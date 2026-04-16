@@ -1,0 +1,582 @@
+openapi: 3.1.0
+info:
+  title: Hinter Factory ML API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8000
+tags:
+  - name: documents
+  - name: tags
+  - name: labelingFunctions
+  - name: lfRuns
+  - name: probabilisticLabels
+  - name: goldLabels
+paths:
+  /v1/documents/upload:
+    post:
+      tags: [documents]
+      operationId: uploadDocuments
+      summary: Ingest documents from CSV or JSON
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                text_column:
+                  type: string
+                  default: text
+                  description: CSV column name for document body
+                id_column:
+                  type: string
+                  description: Optional CSV column to use as stable id
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentIngestResult"
+  /v1/documents:
+    get:
+      tags: [documents]
+      operationId: listDocuments
+      summary: Explore corpus with search and facets
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: length_bucket
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/LengthBucket"
+        - in: query
+          name: metadata_key
+          schema: { type: string }
+        - in: query
+          name: metadata_value
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentListResponse"
+  /v1/documents/{document_id}:
+    get:
+      tags: [documents]
+      operationId: getDocument
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "404":
+          description: Not found
+  /v1/documents/facets/metadata-keys:
+    get:
+      tags: [documents]
+      operationId: listMetadataFacetKeys
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+  /v1/documents/facets/metadata-values:
+    get:
+      tags: [documents]
+      operationId: listMetadataFacetValues
+      parameters:
+        - in: query
+          name: key
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+  /v1/tags:
+    get:
+      tags: [tags]
+      operationId: listTags
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tag"
+    post:
+      tags: [tags]
+      operationId: createTag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TagCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+  /v1/labeling-functions:
+    get:
+      tags: [labelingFunctions]
+      operationId: listLabelingFunctions
+      parameters:
+        - in: query
+          name: tag_id
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LabelingFunction"
+    post:
+      tags: [labelingFunctions]
+      operationId: createLabelingFunction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LabelingFunctionCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabelingFunction"
+  /v1/labeling-functions/{labeling_function_id}:
+    patch:
+      tags: [labelingFunctions]
+      operationId: updateLabelingFunction
+      parameters:
+        - $ref: "#/components/parameters/LabelingFunctionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LabelingFunctionUpdate"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabelingFunction"
+    delete:
+      tags: [labelingFunctions]
+      operationId: deleteLabelingFunction
+      parameters:
+        - $ref: "#/components/parameters/LabelingFunctionId"
+      responses:
+        "204":
+          description: Deleted
+  /v1/labeling-functions/{labeling_function_id}/preview:
+    post:
+      tags: [labelingFunctions]
+      operationId: previewLabelingFunction
+      parameters:
+        - $ref: "#/components/parameters/LabelingFunctionId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LabelingFunctionPreviewRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabelingFunctionPreviewResponse"
+  /v1/lf-runs:
+    post:
+      tags: [lfRuns]
+      operationId: createLfRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LfRunCreate"
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LfRun"
+  /v1/lf-runs/{run_id}:
+    get:
+      tags: [lfRuns]
+      operationId: getLfRun
+      parameters:
+        - $ref: "#/components/parameters/LfRunId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LfRun"
+  /v1/lf-runs/{run_id}/matrix:
+    get:
+      tags: [lfRuns]
+      operationId: exportLfMatrix
+      parameters:
+        - $ref: "#/components/parameters/LfRunId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SparseLabelMatrix"
+  /v1/probabilistic-labels:
+    get:
+      tags: [probabilisticLabels]
+      operationId: listProbabilisticLabels
+      parameters:
+        - in: query
+          name: tag_id
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProbabilisticLabel"
+    post:
+      tags: [probabilisticLabels]
+      operationId: upsertProbabilisticLabel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProbabilisticLabelUpsert"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProbabilisticLabel"
+  /v1/gold-labels:
+    get:
+      tags: [goldLabels]
+      operationId: listGoldLabels
+      parameters:
+        - in: query
+          name: document_id
+          schema: { type: string }
+        - in: query
+          name: document_ids
+          description: Repeat query key for each id (e.g. document_ids=a&document_ids=b)
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+        - in: query
+          name: tag_id
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GoldLabel"
+    post:
+      tags: [goldLabels]
+      operationId: createGoldLabel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoldLabelCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoldLabel"
+components:
+  parameters:
+    DocumentId:
+      name: document_id
+      in: path
+      required: true
+      schema: { type: string }
+    LabelingFunctionId:
+      name: labeling_function_id
+      in: path
+      required: true
+      schema: { type: string }
+    LfRunId:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    LengthBucket:
+      type: string
+      enum: [short, medium, long]
+      description: short <100 chars, medium 100-499, long 500+
+    Document:
+      type: object
+      required: [id, text, metadata, char_length, created_at]
+      properties:
+        id: { type: string }
+        text: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+        char_length: { type: integer }
+        created_at: { type: string, format: date-time }
+    DocumentListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Document"
+        total: { type: integer }
+    DocumentIngestResult:
+      type: object
+      required: [inserted, skipped, errors]
+      properties:
+        inserted: { type: integer }
+        skipped: { type: integer }
+        errors:
+          type: array
+          items: { type: string }
+    Tag:
+      type: object
+      required: [id, name, taxonomy_version, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        taxonomy_version: { type: string }
+        created_at: { type: string, format: date-time }
+    TagCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        taxonomy_version: { type: string, default: "v1" }
+    LabelingFunctionType:
+      type: string
+      enum: [regex, keywords, structural, zeroshot, llm_prompt]
+    LabelingFunction:
+      type: object
+      required: [id, tag_id, name, type, config, enabled, created_at]
+      properties:
+        id: { type: string }
+        tag_id: { type: string }
+        name: { type: string }
+        type:
+          $ref: "#/components/schemas/LabelingFunctionType"
+        config:
+          type: object
+          additionalProperties: true
+          description: Type-specific JSON (patterns, thresholds, etc.)
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+    LabelingFunctionCreate:
+      type: object
+      required: [tag_id, name, type, config]
+      properties:
+        tag_id: { type: string }
+        name: { type: string }
+        type:
+          $ref: "#/components/schemas/LabelingFunctionType"
+        config:
+          type: object
+          additionalProperties: true
+        enabled: { type: boolean, default: true }
+    LabelingFunctionUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        config:
+          type: object
+          additionalProperties: true
+        enabled: { type: boolean }
+    LabelingFunctionPreviewRequest:
+      type: object
+      properties:
+        limit: { type: integer, minimum: 1, maximum: 200, default: 25 }
+        document_ids:
+          type: array
+          items: { type: string }
+    LabelingFunctionPreviewRow:
+      type: object
+      required: [document_id, vote, text_preview]
+      properties:
+        document_id: { type: string }
+        vote: { $ref: "#/components/schemas/LfVote" }
+        text_preview: { type: string }
+    LabelingFunctionPreviewResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/LabelingFunctionPreviewRow"
+    LfVote:
+      type: integer
+      enum: [-1, 0, 1]
+      description: 1 positive for tag, -1 negative, 0 abstain
+    LfRunStatus:
+      type: string
+      enum: [pending, running, completed, failed]
+    LfRunCreate:
+      type: object
+      required: [tag_id, labeling_function_ids]
+      properties:
+        tag_id: { type: string }
+        labeling_function_ids:
+          type: array
+          items: { type: string }
+          minItems: 1
+    LfRun:
+      type: object
+      required: [id, tag_id, labeling_function_ids, status, created_at]
+      properties:
+        id: { type: string }
+        tag_id: { type: string }
+        labeling_function_ids:
+          type: array
+          items: { type: string }
+        status:
+          $ref: "#/components/schemas/LfRunStatus"
+        error: { type: string, nullable: true }
+        documents_scanned: { type: integer }
+        votes_written: { type: integer }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+    SparseLabelMatrix:
+      type: object
+      required: [run_id, document_ids, labeling_function_ids, entries]
+      properties:
+        run_id: { type: string }
+        document_ids:
+          type: array
+          items: { type: string }
+        labeling_function_ids:
+          type: array
+          items: { type: string }
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/SparseLabelMatrixEntry"
+    SparseLabelMatrixEntry:
+      type: object
+      required: [d, l, v]
+      properties:
+        d: { type: integer, description: Index into document_ids }
+        l: { type: integer, description: Index into labeling_function_ids }
+        v:
+          $ref: "#/components/schemas/LfVote"
+    ProbabilisticLabel:
+      type: object
+      required: [document_id, tag_id, probability]
+      properties:
+        document_id: { type: string }
+        tag_id: { type: string }
+        probability: { type: number, minimum: 0, maximum: 1 }
+        conflict_score: { type: number, nullable: true }
+        entropy: { type: number, nullable: true }
+        updated_at: { type: string, format: date-time }
+    ProbabilisticLabelUpsert:
+      type: object
+      required: [document_id, tag_id, probability]
+      properties:
+        document_id: { type: string }
+        tag_id: { type: string }
+        probability: { type: number, minimum: 0, maximum: 1 }
+        conflict_score: { type: number, nullable: true }
+        entropy: { type: number, nullable: true }
+    GoldLabel:
+      type: object
+      required: [id, document_id, tag_id, value, created_at]
+      properties:
+        id: { type: string }
+        document_id: { type: string }
+        tag_id: { type: string }
+        value:
+          type: integer
+          enum: [-1, 0, 1]
+          description: Gold / manual label aligned with LF votes (1 positive, -1 negative, 0 abstain)
+        note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    GoldLabelCreate:
+      type: object
+      required: [document_id, tag_id, value]
+      properties:
+        document_id: { type: string }
+        tag_id: { type: string }
+        value:
+          type: integer
+          enum: [-1, 0, 1]
+        note: { type: string, nullable: true }

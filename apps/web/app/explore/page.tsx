@@ -1,0 +1,442 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+import type { components } from "@hinter/contracts";
+
+import { api } from "@/lib/api";
+import { describeMlFetchError } from "@/lib/ml-fetch-error";
+
+type Document = components["schemas"]["Document"];
+type LengthBucket = components["schemas"]["LengthBucket"];
+type Tag = components["schemas"]["Tag"];
+type LfVote = components["schemas"]["LfVote"];
+type GoldLabel = components["schemas"]["GoldLabel"];
+
+export default function ExplorePage() {
+  const [q, setQ] = useState("");
+  const [buckets, setBuckets] = useState<LengthBucket[]>([]);
+  const [metaKey, setMetaKey] = useState("");
+  const [metaValue, setMetaValue] = useState("");
+  const [metaKeys, setMetaKeys] = useState<string[]>([]);
+  const [metaValues, setMetaValues] = useState<string[]>([]);
+  const [rows, setRows] = useState<Document[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [csvTextColumn, setCsvTextColumn] = useState("text");
+  const [csvIdColumn, setCsvIdColumn] = useState("");
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [tagsLoadError, setTagsLoadError] = useState<string | null>(null);
+  const [goldTagId, setGoldTagId] = useState("");
+  const [goldByDocId, setGoldByDocId] = useState<Partial<Record<string, LfVote>>>({});
+  const [goldSavingDocId, setGoldSavingDocId] = useState<string | null>(null);
+  const [goldMsg, setGoldMsg] = useState<string | null>(null);
+
+  const queryString = useMemo(() => {
+    const sp = new URLSearchParams();
+    if (q.trim()) sp.set("q", q.trim());
+    for (const b of buckets) sp.append("length_bucket", b);
+    if (metaKey && metaValue) {
+      sp.set("metadata_key", metaKey);
+      sp.set("metadata_value", metaValue);
+    }
+    sp.set("limit", "50");
+    sp.set("offset", "0");
+    return sp.toString();
+  }, [q, buckets, metaKey, metaValue]);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/ml/v1/documents?${queryString}`);
+      if (!res.ok) {
+        setError("Failed to load documents");
+        setRows([]);
+        setTotal(0);
+      } else {
+        const data = (await res.json()) as { items: Document[]; total: number };
+        setRows(data.items);
+        setTotal(data.total);
+      }
+    } catch (e) {
+      setRows([]);
+      setTotal(0);
+      setError(describeMlFetchError(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [queryString]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const { data } = await api.GET("/v1/tags", {});
+        if (data) {
+          setTags(data);
+          setTagsLoadError(null);
+        }
+      } catch (e) {
+        setTagsLoadError(describeMlFetchError(e));
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const { data } = await api.GET("/v1/documents/facets/metadata-keys", {});
+        if (data) setMetaKeys(data);
+      } catch {
+        /* facets optional */
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!goldTagId || !rows.length) {
+      setGoldByDocId({});
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const sp = new URLSearchParams();
+        sp.set("tag_id", goldTagId);
+        for (const r of rows) sp.append("document_ids", r.id);
+        const res = await fetch(`/api/ml/v1/gold-labels?${sp.toString()}`);
+        if (!res.ok) {
+          if (!cancelled) setGoldMsg("Could not load gold labels for this page.");
+          return;
+        }
+        const list = (await res.json()) as GoldLabel[];
+        if (cancelled) return;
+        const next: Partial<Record<string, LfVote>> = {};
+        for (const g of list) next[g.document_id] = g.value;
+        setGoldByDocId(next);
+        setGoldMsg(null);
+      } catch (e) {
+        if (!cancelled) setGoldMsg(describeMlFetchError(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [goldTagId, rows]);
+
+  useEffect(() => {
+    if (!metaKey) {
+      setMetaValues([]);
+      return;
+    }
+    void (async () => {
+      const { data } = await api.GET("/v1/documents/facets/metadata-values", {
+        params: { query: { key: metaKey, limit: 200 } },
+      });
+      if (data) setMetaValues(data);
+    })();
+  }, [metaKey]);
+
+  const toggleBucket = (b: LengthBucket) => {
+    setBuckets((prev) => (prev.includes(b) ? prev.filter((x) => x !== b) : [...prev, b]));
+  };
+
+  const setGoldVote = async (documentId: string, value: LfVote) => {
+    if (!goldTagId) return;
+    setGoldMsg(null);
+    const prev = goldByDocId[documentId];
+    setGoldByDocId((m) => ({ ...m, [documentId]: value }));
+    setGoldSavingDocId(documentId);
+    const { error } = await api.POST("/v1/gold-labels", {
+      body: { document_id: documentId, tag_id: goldTagId, value },
+    });
+    setGoldSavingDocId(null);
+    if (error) {
+      setGoldByDocId((m) => {
+        const next = { ...m };
+        if (prev === undefined) delete next[documentId];
+        else next[documentId] = prev;
+        return next;
+      });
+      setGoldMsg("Could not save gold label.");
+    }
+  };
+
+  const onUpload = async (file: File | null) => {
+    if (!file) return;
+    setUploadMsg(null);
+    const fd = new FormData();
+    fd.append("file", file);
+    const textCol = csvTextColumn.trim() || "text";
+    fd.append("text_column", textCol);
+    const idCol = csvIdColumn.trim();
+    if (idCol) fd.append("id_column", idCol);
+    let res: Response;
+    try {
+      res = await fetch("/api/ml/v1/documents/upload", { method: "POST", body: fd });
+    } catch (e) {
+      setUploadMsg(describeMlFetchError(e));
+      return;
+    }
+    let payload: unknown = null;
+    try {
+      payload = await res.json();
+    } catch {
+      /* ignore */
+    }
+    const body = payload as { inserted?: number; skipped?: number; errors?: string[]; detail?: unknown };
+    if (!res.ok) {
+      let detail = `Upload failed (HTTP ${res.status}).`;
+      if (typeof body.detail === "string") {
+        detail = body.detail;
+      } else if (Array.isArray(body.detail)) {
+        detail = body.detail
+          .map((e: unknown) => (typeof e === "object" && e && "msg" in e ? String((e as { msg: string }).msg) : JSON.stringify(e)))
+          .join("; ");
+      }
+      setUploadMsg(detail);
+      return;
+    }
+    setUploadMsg(
+      `Inserted ${body.inserted ?? 0}, updated ${body.skipped ?? 0}. ${(body.errors ?? []).length} row warnings.`,
+    );
+    await refresh();
+  };
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h1 className="text-2xl font-semibold text-white">Explore</h1>
+        <p className="mt-2 max-w-2xl text-sm text-ink-500">
+          Ingest a CSV/JSON corpus, then search and facet by length buckets and top-level JSON metadata fields. Set
+          manual gold labels (+1 / 0 / −1 per tag, same semantics as labeling functions) for documents on this page.
+        </p>
+      </div>
+
+      <section className="rounded-lg border border-ink-900 bg-ink-900/30 p-4">
+        <div className="text-sm font-medium text-white">Ingest</div>
+        <p className="mt-1 text-xs text-ink-500">
+          For CSV, set <span className="text-ink-200">Text column</span> to the header that holds each document&apos;s
+          body (match is case-insensitive). Any other columns are stored as JSON metadata. JSON uploads ignore these
+          fields.
+        </p>
+        <div className="mt-3 grid max-w-xl gap-3 sm:grid-cols-2">
+          <label className="block text-xs text-ink-500">
+            Text column (CSV header)
+            <input
+              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-2 py-1.5 font-mono text-sm text-white outline-none ring-accent-500 focus:ring-2"
+              value={csvTextColumn}
+              onChange={(e) => setCsvTextColumn(e.target.value)}
+              placeholder="text"
+              spellCheck={false}
+            />
+          </label>
+          <label className="block text-xs text-ink-500">
+            Id column (optional)
+            <input
+              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-2 py-1.5 font-mono text-sm text-white outline-none ring-accent-500 focus:ring-2"
+              value={csvIdColumn}
+              onChange={(e) => setCsvIdColumn(e.target.value)}
+              placeholder="e.g. id or file"
+              spellCheck={false}
+            />
+          </label>
+        </div>
+        <input
+          className="mt-3 block w-full max-w-md text-sm text-ink-200 file:mr-4 file:rounded-md file:border-0 file:bg-accent-600 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-accent-500"
+          type="file"
+          accept=".csv,.json"
+          onChange={(e) => void onUpload(e.target.files?.[0] ?? null)}
+        />
+        {uploadMsg ? <div className="mt-2 text-xs text-ink-200">{uploadMsg}</div> : null}
+      </section>
+
+      <section className="space-y-4 rounded-lg border border-ink-900 bg-ink-900/30 p-4">
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="block text-sm">
+            <div className="text-xs font-medium text-ink-500">Search</div>
+            <input
+              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-3 py-2 text-sm text-white outline-none ring-accent-500 focus:ring-2"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Substring match on document text"
+            />
+          </label>
+
+          <div className="text-sm">
+            <div className="text-xs font-medium text-ink-500">Length buckets</div>
+            <div className="mt-2 flex flex-wrap gap-3 text-xs text-ink-200">
+              {(["short", "medium", "long"] as const).map((b) => (
+                <label key={b} className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={buckets.includes(b)}
+                    onChange={() => toggleBucket(b)}
+                    className="h-4 w-4 rounded border-ink-700 bg-ink-950"
+                  />
+                  <span>
+                    {b} <span className="text-ink-500">({bucketHint(b)})</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="block text-sm">
+            <div className="text-xs font-medium text-ink-500">Metadata key</div>
+            <select
+              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-3 py-2 text-sm text-white outline-none ring-accent-500 focus:ring-2"
+              value={metaKey}
+              onChange={(e) => {
+                setMetaKey(e.target.value);
+                setMetaValue("");
+              }}
+            >
+              <option value="">(none)</option>
+              {metaKeys.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block text-sm">
+            <div className="text-xs font-medium text-ink-500">Metadata value</div>
+            <select
+              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-3 py-2 text-sm text-white outline-none ring-accent-500 focus:ring-2"
+              value={metaValue}
+              disabled={!metaKey}
+              onChange={(e) => setMetaValue(e.target.value)}
+            >
+              <option value="">(any)</option>
+              {metaValues.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            className="rounded-md bg-accent-600 px-3 py-2 text-sm font-medium text-white hover:bg-accent-500"
+            onClick={() => void refresh()}
+          >
+            Refresh
+          </button>
+          {loading ? <span className="text-xs text-ink-500">Loading…</span> : null}
+          {error ? <span className="text-xs text-red-400">{error}</span> : null}
+          <span className="text-xs text-ink-500">{total} matching documents</span>
+        </div>
+
+        <div className="mt-4 border-t border-ink-800 pt-4">
+          <div className="text-xs font-medium text-ink-500">Manual gold label (per tag)</div>
+          <p className="mt-1 text-xs text-ink-500">
+            Choose a tag, then vote +1 (positive for tag), 0 (abstain), or −1 (negative). Tags are created in LF
+            Studio.
+          </p>
+          {tagsLoadError ? <div className="mt-2 text-xs text-red-400">{tagsLoadError}</div> : null}
+          <label className="mt-2 block max-w-md text-xs text-ink-500">
+            Tag
+            <select
+              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-3 py-2 text-sm text-white outline-none ring-accent-500 focus:ring-2"
+              value={goldTagId}
+              onChange={(e) => setGoldTagId(e.target.value)}
+            >
+              <option value="">(none — hide gold column)</option>
+              {tags.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!tags.length && !tagsLoadError ? (
+            <p className="mt-2 text-xs text-ink-500">No tags yet. Open LF Studio and create a tag first.</p>
+          ) : null}
+          {goldMsg ? <div className="mt-2 text-xs text-amber-400">{goldMsg}</div> : null}
+        </div>
+      </section>
+
+      <section className="overflow-hidden rounded-lg border border-ink-900">
+        <table className="min-w-full divide-y divide-ink-900 text-left text-sm">
+          <thead className="bg-ink-900/50 text-xs uppercase tracking-wide text-ink-500">
+            <tr>
+              <th className="px-3 py-2">ID</th>
+              <th className="px-3 py-2">Len</th>
+              <th className="px-3 py-2">Metadata</th>
+              <th className="px-3 py-2">Text</th>
+              {goldTagId ? (
+                <th className="px-2 py-2 whitespace-nowrap">Gold</th>
+              ) : null}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-ink-900">
+            {rows.map((d) => (
+              <tr key={d.id} className="align-top">
+                <td className="px-3 py-2 font-mono text-xs text-ink-500">{d.id.slice(0, 8)}…</td>
+                <td className="px-3 py-2 text-xs text-ink-200">{d.char_length}</td>
+                <td className="px-3 py-2 text-xs text-ink-500">
+                  <pre className="max-w-xs whitespace-pre-wrap break-words">
+                    {JSON.stringify(d.metadata, null, 0)}
+                  </pre>
+                </td>
+                <td className="px-3 py-2 text-xs text-ink-200">
+                  {d.text.length > 220 ? `${d.text.slice(0, 220)}…` : d.text}
+                </td>
+                {goldTagId ? (
+                  <td className="px-2 py-2 align-middle">
+                    <div className="flex flex-wrap gap-1">
+                      {([1, 0, -1] as const).map((v) => {
+                        const active = goldByDocId[d.id] === v;
+                        return (
+                          <button
+                            key={v}
+                            type="button"
+                            title={v === 1 ? "Positive for tag" : v === 0 ? "Abstain" : "Negative for tag"}
+                            disabled={goldSavingDocId === d.id}
+                            className={`rounded px-2 py-1 font-mono text-[11px] font-medium transition-colors disabled:opacity-40 ${
+                              active
+                                ? "bg-accent-600 text-white"
+                                : "border border-ink-600 bg-ink-950 text-ink-200 hover:border-accent-500"
+                            }`}
+                            onClick={() => void setGoldVote(d.id, v)}
+                          >
+                            {v === 1 ? "+1" : v === 0 ? "0" : "−1"}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </td>
+                ) : null}
+              </tr>
+            ))}
+            {!rows.length ? (
+              <tr>
+                <td className="px-3 py-6 text-sm text-ink-500" colSpan={goldTagId ? 5 : 4}>
+                  No documents yet. Upload a CSV/JSON file to begin.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </section>
+    </div>
+  );
+}
+
+function bucketHint(b: LengthBucket) {
+  if (b === "short") return "<100 chars";
+  if (b === "medium") return "100–499 chars";
+  return "500+ chars";
+}
