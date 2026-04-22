@@ -11,6 +11,7 @@ tags:
   - name: lfRuns
   - name: probabilisticLabels
   - name: goldLabels
+  - name: evaluation
 paths:
   /v1/documents/upload:
     post:
@@ -233,6 +234,29 @@ paths:
               schema:
                 $ref: "#/components/schemas/LabelingFunctionPreviewResponse"
   /v1/lf-runs:
+    get:
+      tags: [lfRuns]
+      operationId: listLfRuns
+      parameters:
+        - in: query
+          name: tag_id
+          schema: { type: string }
+        - in: query
+          name: status
+          schema:
+            $ref: "#/components/schemas/LfRunStatus"
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LfRun"
     post:
       tags: [lfRuns]
       operationId: createLfRun
@@ -314,6 +338,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProbabilisticLabel"
+  /v1/evaluation:
+    get:
+      tags: [evaluation]
+      operationId: getEvaluation
+      summary: Confusion stats and FP/FN list for a tag's gold-labeled validation set
+      parameters:
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: run_id
+          description: LF run to evaluate; defaults to latest completed run for tag
+          schema: { type: string }
+        - in: query
+          name: text_preview_chars
+          schema: { type: integer, minimum: 20, maximum: 2000, default: 240 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 2000, default: 200 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluationResponse"
+        "404":
+          description: Tag or run not found
+        "409":
+          description: Specified run is not completed
   /v1/gold-labels:
     get:
       tags: [goldLabels]
@@ -580,3 +635,114 @@ components:
           type: integer
           enum: [-1, 0, 1]
         note: { type: string, nullable: true }
+    EvaluationCategory:
+      type: string
+      enum:
+        - true_positive
+        - true_negative
+        - false_positive
+        - false_negative
+        - abstain_on_positive
+        - abstain_on_negative
+        - gold_abstain
+      description: |
+        Per-document classification of an LF-run prediction against the gold label.
+        false_negative = gold +1 but prediction is -1.
+        abstain_on_positive = gold +1 but no LF fired (prediction 0); also counts as a missed positive in recall.
+        false_positive = gold -1 but prediction is +1.
+        abstain_on_negative = gold -1 but no LF fired; not a false positive but lowers coverage.
+        gold_abstain = gold value 0; excluded from precision/recall/F1.
+    EvaluationVote:
+      type: object
+      required: [labeling_function_id, labeling_function_name, vote]
+      properties:
+        labeling_function_id: { type: string }
+        labeling_function_name: { type: string }
+        vote: { $ref: "#/components/schemas/LfVote" }
+    EvaluationRow:
+      type: object
+      required: [document_id, text_preview, gold, predicted, vote_sum, category, votes]
+      properties:
+        document_id: { type: string }
+        text_preview: { type: string }
+        gold: { $ref: "#/components/schemas/LfVote" }
+        predicted: { $ref: "#/components/schemas/LfVote" }
+        vote_sum:
+          type: integer
+          description: Sum of LF votes; sign decides the prediction.
+        category: { $ref: "#/components/schemas/EvaluationCategory" }
+        votes:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvaluationVote"
+    EvaluationSummary:
+      type: object
+      required:
+        - total_gold
+        - considered
+        - true_positive
+        - true_negative
+        - false_positive
+        - false_negative
+        - abstain_on_positive
+        - abstain_on_negative
+        - gold_abstain
+      properties:
+        total_gold:
+          type: integer
+          description: All gold-labeled docs for the tag (incl. gold == 0)
+        considered:
+          type: integer
+          description: Gold-labeled docs with gold != 0; the validation set used for metrics
+        true_positive: { type: integer }
+        true_negative: { type: integer }
+        false_positive: { type: integer }
+        false_negative: { type: integer }
+        abstain_on_positive:
+          type: integer
+          description: Gold +1 but prediction abstained (vote sum 0); also counted as missed positive in recall
+        abstain_on_negative:
+          type: integer
+          description: Gold -1 but prediction abstained; not a false positive
+        gold_abstain:
+          type: integer
+          description: Gold value 0; not counted in precision/recall
+        precision:
+          type: number
+          nullable: true
+          description: TP / (TP + FP)
+        recall:
+          type: number
+          nullable: true
+          description: TP / (TP + FN + abstain_on_positive)
+        f1:
+          type: number
+          nullable: true
+        coverage:
+          type: number
+          nullable: true
+          description: Fraction of considered docs where the prediction is non-abstain
+    EvaluationResponse:
+      type: object
+      required: [tag_id, summary, rows]
+      properties:
+        tag_id: { type: string }
+        run_id:
+          type: string
+          nullable: true
+        run_completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        summary:
+          $ref: "#/components/schemas/EvaluationSummary"
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvaluationRow"
+        truncated:
+          type: boolean
+          description: True when more rows existed than the limit; summary counts are exact regardless.
+        message:
+          type: string
+          description: Optional human-readable explanation (e.g. when no run exists yet)

@@ -7,7 +7,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.database import Base, engine
-from app.routers import documents, gold_labels, labeling_functions, lf_runs, probabilistic, tags
+from app.routers import (
+    documents,
+    evaluation,
+    gold_labels,
+    labeling_functions,
+    lf_runs,
+    probabilistic,
+    tags,
+)
 
 
 @asynccontextmanager
@@ -34,6 +42,7 @@ app.include_router(labeling_functions.router)
 app.include_router(lf_runs.router)
 app.include_router(probabilistic.router)
 app.include_router(gold_labels.router)
+app.include_router(evaluation.router)
 
 
 @app.get("/healthz")

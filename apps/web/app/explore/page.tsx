@@ -27,6 +27,9 @@ export default function ExplorePage() {
   const [error, setError] = useState<string | null>(null);
   const [csvTextColumn, setCsvTextColumn] = useState("text");
   const [csvIdColumn, setCsvIdColumn] = useState("");
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [expandedTextIds, setExpandedTextIds] = useState<Set<string>>(() => new Set());
   const [tags, setTags] = useState<Tag[]>([]);
   const [tagsLoadError, setTagsLoadError] = useState<string | null>(null);
   const [goldTagId, setGoldTagId] = useState("");
@@ -147,6 +150,22 @@ export default function ExplorePage() {
     setBuckets((prev) => (prev.includes(b) ? prev.filter((x) => x !== b) : [...prev, b]));
   };
 
+  const toggleTextExpanded = (id: string) => {
+    setExpandedTextIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const allExpanded = rows.length > 0 && rows.every((r) => expandedTextIds.has(r.id));
+  const setAllExpanded = (expand: boolean) => {
+    setExpandedTextIds(expand ? new Set(rows.map((r) => r.id)) : new Set());
+  };
+
+  const TEXT_PREVIEW_CHARS = 220;
+
   const setGoldVote = async (documentId: string, value: LfVote) => {
     if (!goldTagId) return;
     setGoldMsg(null);
@@ -168,9 +187,14 @@ export default function ExplorePage() {
     }
   };
 
-  const onUpload = async (file: File | null) => {
-    if (!file) return;
+  const onUpload = async () => {
+    const file = pendingFile;
+    if (!file) {
+      setUploadMsg("Choose a file first.");
+      return;
+    }
     setUploadMsg(null);
+    setUploading(true);
     const fd = new FormData();
     fd.append("file", file);
     const textCol = csvTextColumn.trim() || "text";
@@ -182,6 +206,7 @@ export default function ExplorePage() {
       res = await fetch("/api/ml/v1/documents/upload", { method: "POST", body: fd });
     } catch (e) {
       setUploadMsg(describeMlFetchError(e));
+      setUploading(false);
       return;
     }
     let payload: unknown = null;
@@ -201,11 +226,14 @@ export default function ExplorePage() {
           .join("; ");
       }
       setUploadMsg(detail);
+      setUploading(false);
       return;
     }
     setUploadMsg(
       `Inserted ${body.inserted ?? 0}, updated ${body.skipped ?? 0}. ${(body.errors ?? []).length} row warnings.`,
     );
+    setUploading(false);
+    setPendingFile(null);
     await refresh();
   };
 
@@ -248,12 +276,30 @@ export default function ExplorePage() {
             />
           </label>
         </div>
-        <input
-          className="mt-3 block w-full max-w-md text-sm text-ink-200 file:mr-4 file:rounded-md file:border-0 file:bg-accent-600 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-accent-500"
-          type="file"
-          accept=".csv,.json"
-          onChange={(e) => void onUpload(e.target.files?.[0] ?? null)}
-        />
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <input
+            className="block w-full max-w-md text-sm text-ink-200 file:mr-4 file:rounded-md file:border-0 file:bg-accent-600 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-accent-500"
+            type="file"
+            accept=".csv,.json"
+            onChange={(e) => {
+              setPendingFile(e.target.files?.[0] ?? null);
+              setUploadMsg(null);
+            }}
+          />
+          <button
+            type="button"
+            disabled={!pendingFile || uploading}
+            onClick={() => void onUpload()}
+            className="rounded-md bg-accent-600 px-3 py-2 text-sm font-medium text-white hover:bg-accent-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {uploading ? "Uploading…" : "Upload"}
+          </button>
+          {pendingFile ? (
+            <span className="text-xs text-ink-500">
+              Ready: <span className="text-ink-200">{pendingFile.name}</span>
+            </span>
+          ) : null}
+        </div>
         {uploadMsg ? <div className="mt-2 text-xs text-ink-200">{uploadMsg}</div> : null}
       </section>
 
@@ -368,6 +414,19 @@ export default function ExplorePage() {
         </div>
       </section>
 
+      {rows.length ? (
+        <div className="-mb-4 flex items-center justify-end gap-2 text-xs text-ink-500">
+          <span>Text preview</span>
+          <button
+            type="button"
+            onClick={() => setAllExpanded(!allExpanded)}
+            className="rounded border border-ink-700 bg-ink-950 px-2 py-1 text-xs text-ink-200 hover:border-accent-500"
+          >
+            {allExpanded ? "Collapse all" : "Expand all"}
+          </button>
+        </div>
+      ) : null}
+
       <section className="overflow-hidden rounded-lg border border-ink-900">
         <table className="min-w-full divide-y divide-ink-900 text-left text-sm">
           <thead className="bg-ink-900/50 text-xs uppercase tracking-wide text-ink-500">
@@ -375,14 +434,18 @@ export default function ExplorePage() {
               <th className="px-3 py-2">ID</th>
               <th className="px-3 py-2">Len</th>
               <th className="px-3 py-2">Metadata</th>
-              <th className="px-3 py-2">Text</th>
+              <th className="w-full px-3 py-2">Text</th>
               {goldTagId ? (
                 <th className="px-2 py-2 whitespace-nowrap">Gold</th>
               ) : null}
             </tr>
           </thead>
           <tbody className="divide-y divide-ink-900">
-            {rows.map((d) => (
+            {rows.map((d) => {
+              const expanded = expandedTextIds.has(d.id);
+              const isLong = d.text.length > TEXT_PREVIEW_CHARS;
+              const shown = expanded || !isLong ? d.text : `${d.text.slice(0, TEXT_PREVIEW_CHARS)}…`;
+              return (
               <tr key={d.id} className="align-top">
                 <td className="px-3 py-2 font-mono text-xs text-ink-500">{d.id.slice(0, 8)}…</td>
                 <td className="px-3 py-2 text-xs text-ink-200">{d.char_length}</td>
@@ -392,7 +455,22 @@ export default function ExplorePage() {
                   </pre>
                 </td>
                 <td className="px-3 py-2 text-xs text-ink-200">
-                  {d.text.length > 220 ? `${d.text.slice(0, 220)}…` : d.text}
+                  <pre
+                    className={`whitespace-pre-wrap break-words font-sans ${
+                      expanded ? "" : "max-h-24 overflow-hidden"
+                    }`}
+                  >
+                    {shown}
+                  </pre>
+                  {isLong ? (
+                    <button
+                      type="button"
+                      onClick={() => toggleTextExpanded(d.id)}
+                      className="mt-1 text-[11px] font-medium text-accent-400 hover:text-accent-300"
+                    >
+                      {expanded ? "Show less" : `Show full (${d.char_length} chars)`}
+                    </button>
+                  ) : null}
                 </td>
                 {goldTagId ? (
                   <td className="px-2 py-2 align-middle">
@@ -420,7 +498,8 @@ export default function ExplorePage() {
                   </td>
                 ) : null}
               </tr>
-            ))}
+              );
+            })}
             {!rows.length ? (
               <tr>
                 <td className="px-3 py-6 text-sm text-ink-500" colSpan={goldTagId ? 5 : 4}>

@@ -17,6 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <nav className="flex items-center gap-4 text-sm text-ink-200">
               <Link href="/explore">Explore</Link>
               <Link href="/studio">LF Studio</Link>
+              <Link href="/evaluation">Evaluation</Link>
             </nav>
           </div>
         </header>

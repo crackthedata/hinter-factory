@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -85,6 +85,23 @@ def create_lf_run(payload: dict, db: Annotated[Session, Depends(get_db)]):
     db.commit()
     db.refresh(run)
     return _serialize_run(run, [lf.id for lf in lf_rows])
+
+
+@router.get("")
+def list_lf_runs(
+    db: Annotated[Session, Depends(get_db)],
+    tag_id: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    stmt = select(LfRun)
+    if tag_id:
+        stmt = stmt.where(LfRun.tag_id == tag_id)
+    if status:
+        stmt = stmt.where(LfRun.status == status)
+    stmt = stmt.order_by(LfRun.created_at.desc()).limit(limit)
+    runs = list(db.scalars(stmt))
+    return [_serialize_run(r, _ordered_lf_ids(db, r.id)) for r in runs]
 
 
 @router.get("/{run_id}")
