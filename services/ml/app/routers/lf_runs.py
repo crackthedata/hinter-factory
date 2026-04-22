@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.lf_executor import LfConfigError, execute_labeling_function
 from app.models import Document, LabelingFunction, LfRun, LfRunLabelingFunction, LfRunVote, Tag
+from app.project_scope import resolve_project_id
 
 router = APIRouter(prefix="/v1/lf-runs", tags=["lfRuns"])
 
@@ -37,14 +38,26 @@ def create_lf_run(payload: dict, db: Annotated[Session, Depends(get_db)]):
             raise HTTPException(status_code=400, detail=f"LF {lf_id} is disabled")
         lf_rows.append(lf)
 
-    run = LfRun(tag_id=tag_id, status="running", documents_scanned=0, votes_written=0)
+    run = LfRun(
+        project_id=tag.project_id,
+        tag_id=tag_id,
+        status="running",
+        documents_scanned=0,
+        votes_written=0,
+    )
     db.add(run)
     db.flush()
 
     for pos, lf in enumerate(lf_rows):
         db.add(LfRunLabelingFunction(run_id=run.id, labeling_function_id=lf.id, position=pos))
 
-    docs = list(db.scalars(select(Document).order_by(Document.created_at.asc())))
+    docs = list(
+        db.scalars(
+            select(Document)
+            .where(Document.project_id == tag.project_id)
+            .order_by(Document.created_at.asc())
+        )
+    )
     votes: list[LfRunVote] = []
     scanned = 0
     fatal: str | None = None
@@ -90,11 +103,13 @@ def create_lf_run(payload: dict, db: Annotated[Session, Depends(get_db)]):
 @router.get("")
 def list_lf_runs(
     db: Annotated[Session, Depends(get_db)],
+    project_id: str | None = None,
     tag_id: str | None = None,
     status: str | None = None,
     limit: int = Query(default=50, ge=1, le=500),
 ):
-    stmt = select(LfRun)
+    project_id = resolve_project_id(db, project_id)
+    stmt = select(LfRun).where(LfRun.project_id == project_id)
     if tag_id:
         stmt = stmt.where(LfRun.tag_id == tag_id)
     if status:
@@ -122,7 +137,14 @@ def export_matrix(run_id: str, db: Annotated[Session, Depends(get_db)]):
         raise HTTPException(status_code=409, detail="run is not completed")
 
     lf_ids = _ordered_lf_ids(db, run_id)
-    doc_ids = [d.id for d in db.scalars(select(Document).order_by(Document.created_at.asc()))]
+    doc_ids = [
+        d.id
+        for d in db.scalars(
+            select(Document)
+            .where(Document.project_id == run.project_id)
+            .order_by(Document.created_at.asc())
+        )
+    ]
 
     doc_index = {did: i for i, did in enumerate(doc_ids)}
     lf_index = {lid: i for i, lid in enumerate(lf_ids)}
@@ -156,6 +178,7 @@ def _ordered_lf_ids(db: Session, run_id: str) -> list[str]:
 def _serialize_run(run: LfRun, lf_ids: list[str]) -> dict:
     return {
         "id": run.id,
+        "project_id": run.project_id,
         "tag_id": run.tag_id,
         "labeling_function_ids": lf_ids,
         "status": run.status,

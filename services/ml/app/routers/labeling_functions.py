@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.lf_executor import LfConfigError, execute_labeling_function
 from app.models import Document, LabelingFunction, Tag
+from app.project_scope import resolve_project_id
 
 router = APIRouter(prefix="/v1/labeling-functions", tags=["labelingFunctions"])
 
@@ -19,9 +20,11 @@ ALLOWED_TYPES = {"regex", "keywords", "structural", "zeroshot", "llm_prompt"}
 @router.get("")
 def list_labeling_functions(
     db: Annotated[Session, Depends(get_db)],
+    project_id: str | None = None,
     tag_id: str | None = None,
 ):
-    stmt = select(LabelingFunction)
+    project_id = resolve_project_id(db, project_id)
+    stmt = select(LabelingFunction).where(LabelingFunction.project_id == project_id)
     if tag_id:
         stmt = stmt.where(LabelingFunction.tag_id == tag_id)
     stmt = stmt.order_by(LabelingFunction.created_at.desc())
@@ -48,7 +51,14 @@ def create_labeling_function(payload: dict, db: Annotated[Session, Depends(get_d
     if not tag:
         raise HTTPException(status_code=404, detail="tag not found")
 
-    lf = LabelingFunction(tag_id=tag_id, name=name, type=lf_type, config=config, enabled=enabled)
+    lf = LabelingFunction(
+        project_id=tag.project_id,
+        tag_id=tag_id,
+        name=name,
+        type=lf_type,
+        config=config,
+        enabled=enabled,
+    )
     db.add(lf)
     db.commit()
     db.refresh(lf)
@@ -100,7 +110,11 @@ def preview_labeling_function(
     limit = int(body.get("limit") or 25)
     limit = max(1, min(limit, 200))
     doc_ids = body.get("document_ids")
-    stmt = select(Document).order_by(Document.created_at.desc())
+    stmt = (
+        select(Document)
+        .where(Document.project_id == lf.project_id)
+        .order_by(Document.created_at.desc())
+    )
     if isinstance(doc_ids, list) and doc_ids:
         stmt = stmt.where(Document.id.in_([str(x) for x in doc_ids]))
     docs = list(db.scalars(stmt.limit(limit)))
@@ -119,6 +133,7 @@ def preview_labeling_function(
 def _serialize(lf: LabelingFunction) -> dict:
     return {
         "id": lf.id,
+        "project_id": lf.project_id,
         "tag_id": lf.tag_id,
         "name": lf.name,
         "type": lf.type,

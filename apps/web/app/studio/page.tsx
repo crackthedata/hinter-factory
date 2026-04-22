@@ -6,6 +6,9 @@ import type { components } from "@hinter/contracts";
 
 import { api } from "@/lib/api";
 import { describeMlFetchError } from "@/lib/ml-fetch-error";
+import { mlFetch } from "@/lib/ml-fetch";
+import { useProject } from "@/lib/project-context";
+import { NoProjectGate } from "@/components/NoProjectGate";
 
 type Tag = components["schemas"]["Tag"];
 type LabelingFunction = components["schemas"]["LabelingFunction"];
@@ -25,6 +28,7 @@ const DEFAULT_CONFIG: Record<LabelingFunctionType, string> = {
 };
 
 export default function StudioPage() {
+  const { projectId, hasActiveProject } = useProject();
   const [tags, setTags] = useState<Tag[]>([]);
   const [tagName, setTagName] = useState("default");
   const [selectedTagId, setSelectedTagId] = useState<string>("");
@@ -44,6 +48,10 @@ export default function StudioPage() {
   }, [lfType]);
 
   const loadTags = useCallback(async () => {
+    if (!projectId) {
+      setTags([]);
+      return;
+    }
     try {
       const { data } = await api.GET("/v1/tags", {});
       if (data) {
@@ -53,7 +61,7 @@ export default function StudioPage() {
     } catch (e) {
       setError(describeMlFetchError(e));
     }
-  }, []);
+  }, [projectId]);
 
   const loadLfs = useCallback(async () => {
     if (!selectedTagId) return;
@@ -71,7 +79,17 @@ export default function StudioPage() {
 
   useEffect(() => {
     void loadTags();
-  }, [loadTags]);
+  }, [loadTags, projectId]);
+
+  // Reset selected tag when switching projects so we don't keep a stale id
+  // pointing at a tag from another project.
+  useEffect(() => {
+    setSelectedTagId("");
+    setLfs([]);
+    setSelectedLfIds([]);
+    setLastRun(null);
+    setMatrix(null);
+  }, [projectId]);
 
   useEffect(() => {
     if (!selectedTagId && tags[0]) setSelectedTagId(tags[0].id);
@@ -158,7 +176,7 @@ export default function StudioPage() {
       return;
     }
     try {
-      const res = await fetch("/api/ml/v1/lf-runs", {
+      const res = await mlFetch("/api/ml/v1/lf-runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tag_id: selectedTagId, labeling_function_ids: selectedLfIds }),
@@ -171,7 +189,7 @@ export default function StudioPage() {
       setLastRun(run);
       setMessage(`Run ${run.id} — ${run.status}`);
       if (run.status === "completed") {
-        const m = await fetch(`/api/ml/v1/lf-runs/${run.id}/matrix`);
+        const m = await mlFetch(`/api/ml/v1/lf-runs/${run.id}/matrix`);
         if (m.ok) {
           setMatrix((await m.json()) as SparseLabelMatrix);
         }
@@ -184,12 +202,27 @@ export default function StudioPage() {
   const loadMatrix = async () => {
     if (!lastRun?.id) return;
     try {
-      const m = await fetch(`/api/ml/v1/lf-runs/${lastRun.id}/matrix`);
+      const m = await mlFetch(`/api/ml/v1/lf-runs/${lastRun.id}/matrix`);
       if (m.ok) setMatrix((await m.json()) as SparseLabelMatrix);
     } catch (e) {
       setError(describeMlFetchError(e));
     }
   };
+
+  if (!hasActiveProject) {
+    return (
+      <div className="space-y-8">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">LF Studio</h1>
+          <p className="mt-2 max-w-3xl text-sm text-ink-500">
+            Author regex, keyword, and structural labeling functions, preview votes, then run a
+            batch job.
+          </p>
+        </div>
+        <NoProjectGate pageName="LF Studio" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">

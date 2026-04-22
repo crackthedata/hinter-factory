@@ -6,6 +6,9 @@ import type { components } from "@hinter/contracts";
 
 import { api } from "@/lib/api";
 import { describeMlFetchError } from "@/lib/ml-fetch-error";
+import { mlFetch } from "@/lib/ml-fetch";
+import { useProject } from "@/lib/project-context";
+import { NoProjectGate } from "@/components/NoProjectGate";
 
 type Document = components["schemas"]["Document"];
 type LengthBucket = components["schemas"]["LengthBucket"];
@@ -14,6 +17,7 @@ type LfVote = components["schemas"]["LfVote"];
 type GoldLabel = components["schemas"]["GoldLabel"];
 
 export default function ExplorePage() {
+  const { projectId, hasActiveProject } = useProject();
   const [q, setQ] = useState("");
   const [buckets, setBuckets] = useState<LengthBucket[]>([]);
   const [metaKey, setMetaKey] = useState("");
@@ -36,6 +40,16 @@ export default function ExplorePage() {
   const [goldByDocId, setGoldByDocId] = useState<Partial<Record<string, LfVote>>>({});
   const [goldSavingDocId, setGoldSavingDocId] = useState<string | null>(null);
   const [goldMsg, setGoldMsg] = useState<string | null>(null);
+  const [pageSize, setPageSize] = useState(50);
+  const [pageIndex, setPageIndex] = useState(0);
+
+  const PAGE_SIZE_OPTIONS = [25, 50, 100, 200, 500] as const;
+
+  // Reset to the first page whenever filters or page size change. The user is
+  // looking at a different result set, so jumping to the middle would be confusing.
+  useEffect(() => {
+    setPageIndex(0);
+  }, [q, buckets, metaKey, metaValue, pageSize, projectId]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
@@ -45,16 +59,21 @@ export default function ExplorePage() {
       sp.set("metadata_key", metaKey);
       sp.set("metadata_value", metaValue);
     }
-    sp.set("limit", "50");
-    sp.set("offset", "0");
+    sp.set("limit", String(pageSize));
+    sp.set("offset", String(pageIndex * pageSize));
     return sp.toString();
-  }, [q, buckets, metaKey, metaValue]);
+  }, [q, buckets, metaKey, metaValue, pageSize, pageIndex]);
 
   const refresh = useCallback(async () => {
+    if (!projectId) {
+      setRows([]);
+      setTotal(0);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/ml/v1/documents?${queryString}`);
+      const res = await mlFetch(`/api/ml/v1/documents?${queryString}`);
       if (!res.ok) {
         setError("Failed to load documents");
         setRows([]);
@@ -71,13 +90,17 @@ export default function ExplorePage() {
     } finally {
       setLoading(false);
     }
-  }, [queryString]);
+  }, [queryString, projectId]);
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+  }, [refresh, projectId]);
 
   useEffect(() => {
+    if (!projectId) {
+      setTags([]);
+      return;
+    }
     void (async () => {
       try {
         const { data } = await api.GET("/v1/tags", {});
@@ -89,9 +112,13 @@ export default function ExplorePage() {
         setTagsLoadError(describeMlFetchError(e));
       }
     })();
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
+    if (!projectId) {
+      setMetaKeys([]);
+      return;
+    }
     void (async () => {
       try {
         const { data } = await api.GET("/v1/documents/facets/metadata-keys", {});
@@ -100,7 +127,7 @@ export default function ExplorePage() {
         /* facets optional */
       }
     })();
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     if (!goldTagId || !rows.length) {
@@ -113,7 +140,7 @@ export default function ExplorePage() {
         const sp = new URLSearchParams();
         sp.set("tag_id", goldTagId);
         for (const r of rows) sp.append("document_ids", r.id);
-        const res = await fetch(`/api/ml/v1/gold-labels?${sp.toString()}`);
+        const res = await mlFetch(`/api/ml/v1/gold-labels?${sp.toString()}`);
         if (!res.ok) {
           if (!cancelled) setGoldMsg("Could not load gold labels for this page.");
           return;
@@ -203,7 +230,7 @@ export default function ExplorePage() {
     if (idCol) fd.append("id_column", idCol);
     let res: Response;
     try {
-      res = await fetch("/api/ml/v1/documents/upload", { method: "POST", body: fd });
+      res = await mlFetch("/api/ml/v1/documents/upload", { method: "POST", body: fd });
     } catch (e) {
       setUploadMsg(describeMlFetchError(e));
       setUploading(false);
@@ -236,6 +263,21 @@ export default function ExplorePage() {
     setPendingFile(null);
     await refresh();
   };
+
+  if (!hasActiveProject) {
+    return (
+      <div className="space-y-8">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">Explore</h1>
+          <p className="mt-2 max-w-2xl text-sm text-ink-500">
+            Ingest a CSV/JSON corpus, then search and facet by length buckets and top-level JSON
+            metadata fields.
+          </p>
+        </div>
+        <NoProjectGate pageName="Explore" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">
@@ -382,7 +424,28 @@ export default function ExplorePage() {
           </button>
           {loading ? <span className="text-xs text-ink-500">Loading…</span> : null}
           {error ? <span className="text-xs text-red-400">{error}</span> : null}
-          <span className="text-xs text-ink-500">{total} matching documents</span>
+          <span className="text-xs text-ink-500">
+            {total > 0
+              ? `Showing ${pageIndex * pageSize + 1}–${Math.min(
+                  (pageIndex + 1) * pageSize,
+                  total,
+                )} of ${total}`
+              : `${total} matching documents`}
+          </span>
+          <label className="ml-auto flex items-center gap-2 text-xs text-ink-500">
+            Page size
+            <select
+              value={pageSize}
+              onChange={(e) => setPageSize(Number(e.target.value))}
+              className="rounded-md border border-ink-700 bg-ink-950 px-2 py-1 text-xs text-white outline-none ring-accent-500 focus:ring-2"
+            >
+              {PAGE_SIZE_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
         <div className="mt-4 border-t border-ink-800 pt-4">
@@ -509,6 +572,35 @@ export default function ExplorePage() {
             ) : null}
           </tbody>
         </table>
+        {total > 0 ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-ink-900 px-3 py-2 text-xs text-ink-400">
+            <span>
+              Page {pageIndex + 1} of {Math.max(1, Math.ceil(total / pageSize))}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPageIndex((p) => Math.max(0, p - 1))}
+                disabled={pageIndex === 0 || loading}
+                className="rounded-md border border-ink-700 bg-ink-950 px-3 py-1 font-medium text-ink-100 transition-colors hover:border-accent-500 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                ← Prev
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setPageIndex((p) =>
+                    (p + 1) * pageSize < total ? p + 1 : p,
+                  )
+                }
+                disabled={(pageIndex + 1) * pageSize >= total || loading}
+                className="rounded-md border border-ink-700 bg-ink-950 px-3 py-1 font-medium text-ink-100 transition-colors hover:border-accent-500 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        ) : null}
       </section>
     </div>
   );

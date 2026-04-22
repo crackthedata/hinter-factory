@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.database import Base, engine
+from app.projects_migration import migrate as migrate_projects
 from app.routers import (
     documents,
     evaluation,
@@ -14,6 +15,7 @@ from app.routers import (
     labeling_functions,
     lf_runs,
     probabilistic,
+    projects,
     tags,
 )
 
@@ -21,6 +23,7 @@ from app.routers import (
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    migrate_projects(engine)
     yield
 
 
@@ -36,6 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(projects.router)
 app.include_router(documents.router)
 app.include_router(tags.router)
 app.include_router(labeling_functions.router)

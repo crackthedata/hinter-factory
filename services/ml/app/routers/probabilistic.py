@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import ProbabilisticLabel, Tag
+from app.project_scope import resolve_project_id
 
 router = APIRouter(prefix="/v1/probabilistic-labels", tags=["probabilisticLabels"])
 
@@ -16,13 +17,15 @@ router = APIRouter(prefix="/v1/probabilistic-labels", tags=["probabilisticLabels
 @router.get("")
 def list_probabilistic_labels(
     db: Annotated[Session, Depends(get_db)],
+    project_id: str | None = None,
     tag_id: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ):
+    project_id = resolve_project_id(db, project_id)
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    stmt = select(ProbabilisticLabel)
+    stmt = select(ProbabilisticLabel).where(ProbabilisticLabel.project_id == project_id)
     if tag_id:
         stmt = stmt.where(ProbabilisticLabel.tag_id == tag_id)
     stmt = stmt.order_by(ProbabilisticLabel.updated_at.desc()).offset(offset).limit(limit)
@@ -73,6 +76,7 @@ def upsert_probabilistic_label(payload: dict, db: Annotated[Session, Depends(get
         row.updated_at = datetime.utcnow()
     else:
         row = ProbabilisticLabel(
+            project_id=tag.project_id,
             document_id=document_id,
             tag_id=tag_id,
             probability=p,

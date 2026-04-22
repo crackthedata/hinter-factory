@@ -2,9 +2,18 @@ openapi: 3.1.0
 info:
   title: Hinter Factory ML API
   version: 0.1.0
+  description: >-
+    Every scoped endpoint (documents, tags, labeling functions, LF runs,
+    gold labels, probabilistic labels, evaluation) requires a `project_id`
+    query parameter (or, for multipart uploads, a `project_id` form field).
+    There is no implicit fallback project; calls that omit it return 400.
+    Use `GET /v1/projects` to discover available projects and
+    `POST /v1/projects` to create one. The web UI threads `project_id`
+    through every request automatically via its project context.
 servers:
   - url: http://localhost:8000
 tags:
+  - name: projects
   - name: documents
   - name: tags
   - name: labelingFunctions
@@ -13,6 +22,120 @@ tags:
   - name: goldLabels
   - name: evaluation
 paths:
+  /v1/projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      summary: List all projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Project"
+    post:
+      tags: [projects]
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "409":
+          description: Name conflict
+  /v1/projects/{project_id}:
+    get:
+      tags: [projects]
+      operationId: getProject
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectWithCounts"
+        "404":
+          description: Not found
+    delete:
+      tags: [projects]
+      operationId: deleteProject
+      description: Deletes the project and all of its scoped data. The Default project cannot be deleted.
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Deleted
+        "400":
+          description: Cannot delete Default
+        "404":
+          description: Not found
+  /v1/projects/{project_id}/export:
+    get:
+      tags: [projects]
+      operationId: exportProject
+      summary: Export the full project workspace as a portable JSON bundle
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: include_runs
+          schema: { type: boolean, default: true }
+          description: Include the latest completed LF run per tag (with all votes).
+      responses:
+        "200":
+          description: Project bundle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectExport"
+        "404":
+          description: Not found
+  /v1/projects/import:
+    post:
+      tags: [projects]
+      operationId: importProject
+      summary: Import a project bundle. UUIDs are re-minted; relationships are preserved.
+      parameters:
+        - in: query
+          name: target_name
+          schema: { type: string }
+          description: Override the bundled project name. Suffixes on collision either way.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectExport"
+      responses:
+        "201":
+          description: Imported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectWithCounts"
+        "400":
+          description: Bundle invalid
   /v1/documents/upload:
     post:
       tags: [documents]
@@ -130,6 +253,16 @@ paths:
     get:
       tags: [tags]
       operationId: listTags
+      parameters:
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+          description: >-
+            Project to scope the listing to. Required at the runtime / API level
+            (the server returns 400 when it's missing); marked optional in the
+            schema only so the web client's openapi-fetch middleware can inject
+            it transparently from the active project header.
       responses:
         "200":
           description: OK
@@ -139,9 +272,22 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Tag"
+        "400":
+          description: project_id missing
     post:
       tags: [tags]
       operationId: createTag
+      parameters:
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+          description: >-
+            Project to create the tag in. Required at the runtime / API level
+            (the server returns 400 when it's missing); marked optional in the
+            schema only so the web client's openapi-fetch middleware can inject
+            it from the active project header. Wins over a `project_id` field
+            in the request body if both are present.
       requestBody:
         required: true
         content:
@@ -431,6 +577,125 @@ components:
       required: true
       schema: { type: string }
   schemas:
+    Project:
+      type: object
+      required: [id, name, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    ProjectCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string, nullable: true }
+    ProjectCounts:
+      type: object
+      properties:
+        documents: { type: integer }
+        tags: { type: integer }
+        labeling_functions: { type: integer }
+        gold_labels: { type: integer }
+        lf_runs: { type: integer }
+        probabilistic_labels: { type: integer }
+    ProjectWithCounts:
+      allOf:
+        - $ref: "#/components/schemas/Project"
+        - type: object
+          properties:
+            counts: { $ref: "#/components/schemas/ProjectCounts" }
+    ProjectExport:
+      type: object
+      required: [format, format_version, project, documents, tags, labeling_functions, gold_labels, lf_runs, probabilistic_labels]
+      properties:
+        format:
+          type: string
+          enum: ["hinter-factory.project"]
+        format_version: { type: integer }
+        exported_at: { type: string, format: date-time }
+        project:
+          type: object
+          properties:
+            name: { type: string }
+            description: { type: string, nullable: true }
+        documents:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              text: { type: string }
+              metadata: { type: object, additionalProperties: true }
+              char_length: { type: integer }
+              created_at: { type: string, format: date-time }
+        tags:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              taxonomy_version: { type: string }
+              created_at: { type: string, format: date-time }
+        labeling_functions:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              tag_id: { type: string }
+              name: { type: string }
+              type: { type: string }
+              config: { type: object, additionalProperties: true }
+              enabled: { type: boolean }
+              created_at: { type: string, format: date-time }
+        gold_labels:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              document_id: { type: string }
+              tag_id: { type: string }
+              value: { type: integer, enum: [-1, 0, 1] }
+              note: { type: string, nullable: true }
+              created_at: { type: string, format: date-time }
+        lf_runs:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              tag_id: { type: string }
+              status: { type: string }
+              documents_scanned: { type: integer }
+              votes_written: { type: integer }
+              created_at: { type: string, format: date-time }
+              completed_at: { type: string, format: date-time, nullable: true }
+              labeling_function_ids:
+                type: array
+                items: { type: string }
+              votes:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    document_id: { type: string }
+                    labeling_function_id: { type: string }
+                    vote: { type: integer, enum: [-1, 0, 1] }
+        probabilistic_labels:
+          type: array
+          items:
+            type: object
+            properties:
+              document_id: { type: string }
+              tag_id: { type: string }
+              probability: { type: number }
+              conflict_score: { type: number, nullable: true }
+              entropy: { type: number, nullable: true }
+              updated_at: { type: string, format: date-time }
     LengthBucket:
       type: string
       enum: [short, medium, long]
@@ -440,6 +705,7 @@ components:
       required: [id, text, metadata, char_length, created_at]
       properties:
         id: { type: string }
+        project_id: { type: string }
         text: { type: string }
         metadata:
           type: object
@@ -661,10 +927,11 @@ components:
         vote: { $ref: "#/components/schemas/LfVote" }
     EvaluationRow:
       type: object
-      required: [document_id, text_preview, gold, predicted, vote_sum, category, votes]
+      required: [document_id, text_preview, text, gold, predicted, vote_sum, category, votes]
       properties:
         document_id: { type: string }
-        text_preview: { type: string }
+        text_preview: { type: string, description: "Truncated text for compact rendering; capped at text_preview_chars." }
+        text: { type: string, description: "Full document body so the client can offer an expand control." }
         gold: { $ref: "#/components/schemas/LfVote" }
         predicted: { $ref: "#/components/schemas/LfVote" }
         vote_sum:

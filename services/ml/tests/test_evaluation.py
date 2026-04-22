@@ -5,26 +5,31 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from app.database import Base, engine
 from app.main import app
 
 
-def setup_module() -> None:
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+def _new_project(client: TestClient, prefix: str = "Eval") -> str:
+    res = client.post("/v1/projects", json={"name": f"{prefix}_{uuid.uuid4().hex[:6]}"})
+    assert res.status_code == 201, res.text
+    return res.json()["id"]
 
 
-def _ingest(client: TestClient, csv: str) -> list[str]:
+def _ingest(client: TestClient, csv: str, project_id: str) -> list[str]:
     files = {"file": ("docs.csv", io.BytesIO(csv.encode("utf-8")), "text/csv")}
-    res = client.post("/v1/documents/upload", files=files, data={"text_column": "text"})
+    res = client.post(
+        "/v1/documents/upload",
+        files=files,
+        data={"text_column": "text", "project_id": project_id},
+    )
     assert res.status_code == 200, res.text
-    res = client.get("/v1/documents", params={"limit": 500})
+    res = client.get("/v1/documents", params={"limit": 500, "project_id": project_id})
     assert res.status_code == 200
     return [d["id"] for d in res.json()["items"]]
 
 
 def test_evaluation_reports_fp_fn_breakdown() -> None:
     client = TestClient(app)
+    project_id = _new_project(client)
 
     csv = (
         "text\n"
@@ -34,10 +39,12 @@ def test_evaluation_reports_fp_fn_breakdown() -> None:
         "beta lemon mango\n"     # gold -1, no keyword  -> TN-ish (abstain on negative)
         "gamma apple kiwi\n"     # no gold              -> ignored entirely
     )
-    doc_ids = _ingest(client, csv)
+    doc_ids = _ingest(client, csv, project_id=project_id)
     assert len(doc_ids) == 5
 
-    res = client.post("/v1/tags", json={"name": f"fruit_{uuid.uuid4().hex[:8]}"})
+    res = client.post(
+        f"/v1/tags?project_id={project_id}", json={"name": f"fruit_{uuid.uuid4().hex[:8]}"}
+    )
     assert res.status_code == 201
     tag_id = res.json()["id"]
 
@@ -112,7 +119,10 @@ def test_evaluation_404_when_tag_missing() -> None:
 
 def test_evaluation_handles_no_completed_run() -> None:
     client = TestClient(app)
-    res = client.post("/v1/tags", json={"name": f"empty_{uuid.uuid4().hex[:8]}"})
+    project_id = _new_project(client, "EvalEmpty")
+    res = client.post(
+        f"/v1/tags?project_id={project_id}", json={"name": f"empty_{uuid.uuid4().hex[:8]}"}
+    )
     assert res.status_code == 201
     tag_id = res.json()["id"]
     res = client.get("/v1/evaluation", params={"tag_id": tag_id})

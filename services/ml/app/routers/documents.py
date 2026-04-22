@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.ingest import IngestError, parse_csv_bytes, parse_json_bytes
 from app.models import Document
+from app.project_scope import resolve_project_id
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
 
@@ -61,7 +62,9 @@ def upload_documents(
     file: UploadFile = File(...),
     text_column: Annotated[str, Form()] = "text",
     id_column: Annotated[str | None, Form()] = None,
+    project_id: Annotated[str | None, Form()] = None,
 ):
+    project_id = resolve_project_id(db, project_id)
     raw = file.file.read()
     name = file.filename
     ct = file.content_type
@@ -88,6 +91,19 @@ def upload_documents(
     for row in items:
         existing = db.get(Document, row["id"])
         if existing:
+            if existing.project_id != project_id:
+                # ID collision across projects: assign a fresh id rather than overwriting
+                # someone else's document. We re-mint and treat as a new insert.
+                db.add(
+                    Document(
+                        project_id=project_id,
+                        text=row["text"],
+                        metadata_json=row["metadata"],
+                        char_length=len(row["text"]),
+                    )
+                )
+                inserted += 1
+                continue
             existing.text = row["text"]
             existing.metadata_json = row["metadata"]
             existing.char_length = len(row["text"])
@@ -96,6 +112,7 @@ def upload_documents(
             db.add(
                 Document(
                     id=row["id"],
+                    project_id=project_id,
                     text=row["text"],
                     metadata_json=row["metadata"],
                     char_length=len(row["text"]),
@@ -103,12 +120,16 @@ def upload_documents(
             )
             inserted += 1
     db.commit()
-    return {"inserted": inserted, "skipped": skipped, "errors": errors}
+    return {"inserted": inserted, "skipped": skipped, "errors": errors, "project_id": project_id}
 
 
 @router.get("/facets/metadata-keys")
-def metadata_keys(db: Annotated[Session, Depends(get_db)]):
-    docs = db.scalars(select(Document).limit(5000)).all()
+def metadata_keys(
+    db: Annotated[Session, Depends(get_db)],
+    project_id: str | None = None,
+):
+    project_id = resolve_project_id(db, project_id)
+    docs = db.scalars(select(Document).where(Document.project_id == project_id).limit(5000)).all()
     keys: set[str] = set()
     for d in docs:
         if isinstance(d.metadata_json, dict):
@@ -120,26 +141,31 @@ def metadata_keys(db: Annotated[Session, Depends(get_db)]):
 def metadata_values(
     db: Annotated[Session, Depends(get_db)],
     key: str,
+    project_id: str | None = None,
     limit: int = 100,
 ):
+    project_id = resolve_project_id(db, project_id)
     key = _validate_metadata_key(key)
     limit = max(1, min(limit, 500))
     stmt = text(
         """
         SELECT DISTINCT CAST(je.value AS TEXT) AS v
         FROM documents d, json_each(d.metadata) AS je
-        WHERE je.key = :k AND json_type(je.value) IN ('text','integer','real','true','false')
+        WHERE d.project_id = :pid
+          AND je.key = :k
+          AND json_type(je.value) IN ('text','integer','real','true','false')
         ORDER BY v
         LIMIT :lim
         """
     )
-    rows = db.execute(stmt, {"k": key, "lim": limit}).all()
+    rows = db.execute(stmt, {"pid": project_id, "k": key, "lim": limit}).all()
     return [r[0] for r in rows if r[0] is not None]
 
 
 @router.get("")
 def list_documents(
     db: Annotated[Session, Depends(get_db)],
+    project_id: str | None = None,
     q: str | None = None,
     length_bucket: list[str] | None = Query(None),
     metadata_key: str | None = None,
@@ -147,11 +173,12 @@ def list_documents(
     limit: int = 50,
     offset: int = 0,
 ):
+    project_id = resolve_project_id(db, project_id)
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
 
-    stmt = select(Document)
-    count_stmt = select(func.count()).select_from(Document)
+    stmt = select(Document).where(Document.project_id == project_id)
+    count_stmt = select(func.count()).select_from(Document).where(Document.project_id == project_id)
 
     if q:
         like = f"%{q}%"

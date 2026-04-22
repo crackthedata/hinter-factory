@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Document, GoldLabel, Tag
+from app.project_scope import resolve_project_id
 
 router = APIRouter(prefix="/v1/gold-labels", tags=["goldLabels"])
 
@@ -15,11 +16,13 @@ router = APIRouter(prefix="/v1/gold-labels", tags=["goldLabels"])
 @router.get("")
 def list_gold_labels(
     db: Annotated[Session, Depends(get_db)],
+    project_id: str | None = None,
     document_id: str | None = None,
     document_ids: Annotated[list[str] | None, Query()] = None,
     tag_id: str | None = None,
 ):
-    stmt = select(GoldLabel)
+    project_id = resolve_project_id(db, project_id)
+    stmt = select(GoldLabel).where(GoldLabel.project_id == project_id)
     if document_id:
         stmt = stmt.where(GoldLabel.document_id == document_id)
     if document_ids:
@@ -57,10 +60,17 @@ def create_gold_label(payload: dict, db: Annotated[Session, Depends(get_db)]):
     if iv not in (-1, 0, 1):
         raise HTTPException(status_code=400, detail="value must be -1, 0, or 1 (negative, abstain, positive)")
 
-    if not db.get(Document, document_id):
+    doc = db.get(Document, document_id)
+    if not doc:
         raise HTTPException(status_code=404, detail="document not found")
-    if not db.get(Tag, tag_id):
+    tag = db.get(Tag, tag_id)
+    if not tag:
         raise HTTPException(status_code=404, detail="tag not found")
+    if doc.project_id != tag.project_id:
+        raise HTTPException(
+            status_code=400,
+            detail="document and tag belong to different projects",
+        )
 
     existing = db.scalar(
         select(GoldLabel).where(
@@ -75,13 +85,20 @@ def create_gold_label(payload: dict, db: Annotated[Session, Depends(get_db)]):
         db.refresh(existing)
         row = existing
     else:
-        row = GoldLabel(document_id=document_id, tag_id=tag_id, value=iv, note=str(note) if note else None)
+        row = GoldLabel(
+            project_id=tag.project_id,
+            document_id=document_id,
+            tag_id=tag_id,
+            value=iv,
+            note=str(note) if note else None,
+        )
         db.add(row)
         db.commit()
         db.refresh(row)
 
     return {
         "id": row.id,
+        "project_id": row.project_id,
         "document_id": row.document_id,
         "tag_id": row.tag_id,
         "value": int(row.value),

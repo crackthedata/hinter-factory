@@ -5,6 +5,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { components } from "@hinter/contracts";
 
 import { describeMlFetchError } from "@/lib/ml-fetch-error";
+import { mlFetch } from "@/lib/ml-fetch";
+import { useProject } from "@/lib/project-context";
+import { NoProjectGate } from "@/components/NoProjectGate";
 
 type Tag = components["schemas"]["Tag"];
 
@@ -28,12 +31,17 @@ type EvaluationVote = {
 type EvaluationRow = {
   document_id: string;
   text_preview: string;
+  // Full document body. Older API builds may not include it, so handle absence
+  // by falling back to text_preview in the renderer.
+  text?: string;
   gold: LfVote;
   predicted: LfVote;
   vote_sum: number;
   category: EvaluationCategory;
   votes: EvaluationVote[];
 };
+
+const TEXT_PREVIEW_CHARS = 220;
 
 type EvaluationSummary = {
   total_gold: number;
@@ -113,6 +121,7 @@ function formatVote(v: LfVote | number): string {
 }
 
 export default function EvaluationPage() {
+  const { projectId, hasActiveProject } = useProject();
   const [tags, setTags] = useState<Tag[]>([]);
   const [tagId, setTagId] = useState("");
   const [runs, setRuns] = useState<LfRun[]>([]);
@@ -121,14 +130,27 @@ export default function EvaluationPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedDocs, setExpandedDocs] = useState<Set<string>>(() => new Set());
+  const [expandedTexts, setExpandedTexts] = useState<Set<string>>(() => new Set());
   const [visibleCategories, setVisibleCategories] = useState<Set<EvaluationCategory>>(
     () => new Set(["false_negative", "false_positive", "abstain_on_positive"]),
   );
 
+  // Reset selected tag/run on project switch.
   useEffect(() => {
+    setTagId("");
+    setRunId("");
+    setRuns([]);
+    setData(null);
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!projectId) {
+      setTags([]);
+      return;
+    }
     void (async () => {
       try {
-        const res = await fetch("/api/ml/v1/tags");
+        const res = await mlFetch("/api/ml/v1/tags");
         if (!res.ok) {
           setError("Could not load tags.");
           return;
@@ -139,7 +161,7 @@ export default function EvaluationPage() {
         setError(describeMlFetchError(e));
       }
     })();
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     if (!tagId) {
@@ -150,7 +172,7 @@ export default function EvaluationPage() {
     }
     void (async () => {
       try {
-        const res = await fetch(`/api/ml/v1/lf-runs?tag_id=${encodeURIComponent(tagId)}&limit=20`);
+        const res = await mlFetch(`/api/ml/v1/lf-runs?tag_id=${encodeURIComponent(tagId)}&limit=20`);
         if (!res.ok) {
           setRuns([]);
           return;
@@ -168,12 +190,13 @@ export default function EvaluationPage() {
     setLoading(true);
     setError(null);
     setExpandedDocs(new Set());
+    setExpandedTexts(new Set());
     try {
       const sp = new URLSearchParams();
       sp.set("tag_id", tagId);
       if (runId) sp.set("run_id", runId);
       sp.set("limit", "500");
-      const res = await fetch(`/api/ml/v1/evaluation?${sp.toString()}`);
+      const res = await mlFetch(`/api/ml/v1/evaluation?${sp.toString()}`);
       if (!res.ok) {
         let detail = `Evaluation failed (HTTP ${res.status}).`;
         try {
@@ -220,6 +243,15 @@ export default function EvaluationPage() {
     });
   };
 
+  const toggleText = (id: string) => {
+    setExpandedTexts((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   const toggleCategory = (cat: EvaluationCategory) => {
     setVisibleCategories((prev) => {
       const next = new Set(prev);
@@ -233,6 +265,20 @@ export default function EvaluationPage() {
     const id = data?.run_id ?? runId;
     return runs.find((r) => r.id === id) ?? null;
   }, [runs, runId, data?.run_id]);
+
+  if (!hasActiveProject) {
+    return (
+      <div className="space-y-8">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">Evaluation</h1>
+          <p className="mt-2 max-w-2xl text-sm text-ink-500">
+            See where the LFs disagree with your gold labels.
+          </p>
+        </div>
+        <NoProjectGate pageName="Evaluation" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">
@@ -393,6 +439,8 @@ export default function EvaluationPage() {
                         row={r}
                         expanded={expandedDocs.has(r.document_id)}
                         onToggle={() => toggleDoc(r.document_id)}
+                        textExpanded={expandedTexts.has(r.document_id)}
+                        onToggleText={() => toggleText(r.document_id)}
                       />
                     ))}
                   </div>
@@ -448,10 +496,14 @@ function ErrorRow({
   row,
   expanded,
   onToggle,
+  textExpanded,
+  onToggleText,
 }: {
   row: EvaluationRow;
   expanded: boolean;
   onToggle: () => void;
+  textExpanded: boolean;
+  onToggleText: () => void;
 }) {
   const color = CATEGORY_COLOR[row.category];
   return (
@@ -475,9 +527,7 @@ function ErrorRow({
           {expanded ? "Hide details" : `Per-LF votes (${row.votes.length})`}
         </button>
       </div>
-      <pre className="mt-2 whitespace-pre-wrap break-words font-sans text-xs text-ink-200">
-        {row.text_preview}
-      </pre>
+      <DocumentText text={row.text ?? row.text_preview} expanded={textExpanded} onToggle={onToggleText} />
       {expanded ? (
         <div className="mt-3 space-y-1 border-t border-ink-800 pt-2 text-xs">
           {row.votes.length === 0 ? (
@@ -503,6 +553,39 @@ function ErrorRow({
             </table>
           )}
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+function DocumentText({
+  text,
+  expanded,
+  onToggle,
+}: {
+  text: string;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const isLong = text.length > TEXT_PREVIEW_CHARS;
+  const shown = expanded || !isLong ? text : `${text.slice(0, TEXT_PREVIEW_CHARS)}…`;
+  return (
+    <div className="mt-2">
+      <pre
+        className={`whitespace-pre-wrap break-words font-sans text-xs text-ink-200 ${
+          expanded ? "" : "max-h-40 overflow-hidden"
+        }`}
+      >
+        {shown}
+      </pre>
+      {isLong ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          className="mt-1 text-[11px] font-medium text-accent-400 hover:text-accent-300"
+        >
+          {expanded ? "Show less" : `Show full (${text.length} chars)`}
+        </button>
       ) : null}
     </div>
   );

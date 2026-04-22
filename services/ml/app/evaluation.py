@@ -80,6 +80,7 @@ class EvaluationVote:
 class EvaluationRow:
     document_id: str
     text_preview: str
+    text: str
     gold: int
     predicted: int
     vote_sum: int
@@ -189,10 +190,12 @@ def evaluate_run(
             for v in doc_votes
         ]
         evaluation_votes.sort(key=lambda x: x.labeling_function_name.lower())
+        full_text = doc.text or ""
         rows.append(
             EvaluationRow(
                 document_id=g.document_id,
-                text_preview=(doc.text or "")[:text_preview_chars],
+                text_preview=full_text[:text_preview_chars],
+                text=full_text,
                 gold=int(g.value),
                 predicted=predicted,
                 vote_sum=vote_sum,
