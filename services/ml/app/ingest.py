@@ -3,12 +3,20 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
+import tempfile
 import uuid
+from collections.abc import Iterator
 from typing import Any
+
+import polars as pl
 
 
 class IngestError(Exception):
     pass
+
+
+PER_BATCH_ERROR_CAP = 100
 
 
 def _decode_csv_text(data: bytes) -> str:
@@ -125,6 +133,187 @@ def parse_csv_bytes(
             }
         )
     return items, errors
+
+
+def _peek_csv_meta(path: str, sample_bytes: int = 64 * 1024) -> tuple[str, str, str | None]:
+    """Sniff (encoding_for_polars, delimiter, transcoded_path).
+
+    Returns the encoding string to pass to Polars (either "utf8" or "utf8-lossy"),
+    the detected delimiter, and an optional path to a transcoded UTF-8 temp file
+    (set when the source is UTF-16, which Polars cannot read directly). The caller
+    owns the transcoded file and must unlink it.
+    """
+    with open(path, "rb") as fh:
+        head = fh.read(sample_bytes)
+
+    if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
+        # Polars has no native UTF-16 reader; transcode to a UTF-8 temp file.
+        # Streaming transcode keeps memory bounded even for very large inputs.
+        transcoded = tempfile.NamedTemporaryFile(
+            mode="wb", delete=False, suffix=".utf8.csv"
+        )
+        try:
+            with open(path, "rb") as src:
+                # codecs.iterdecode wraps the byte stream; we re-encode chunk-by-chunk.
+                import codecs
+
+                decoder = codecs.getincrementaldecoder("utf-16")()
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    text = decoder.decode(chunk)
+                    if text:
+                        transcoded.write(text.encode("utf-8"))
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    transcoded.write(tail.encode("utf-8"))
+        finally:
+            transcoded.close()
+        # Re-sniff delimiter from the transcoded file.
+        with open(transcoded.name, "rb") as fh:
+            new_head = fh.read(sample_bytes)
+        sample_text = new_head.decode("utf-8", errors="replace")
+        first_line = sample_text.splitlines()[0] if sample_text else ""
+        return "utf8", _sniff_delimiter(first_line), transcoded.name
+
+    sample_text = _decode_csv_text(head)
+    first_line = sample_text.splitlines()[0] if sample_text else ""
+    delimiter = _sniff_delimiter(first_line)
+
+    # Polars accepts "utf8" and "utf8-lossy". UTF-8-with-BOM works under "utf8".
+    try:
+        head.decode("utf-8-sig")
+        encoding = "utf8"
+    except UnicodeDecodeError:
+        encoding = "utf8-lossy"
+    return encoding, delimiter, None
+
+
+def _resolve_field_ci(columns: list[str], requested: str) -> str | None:
+    want = _strip_header(requested).lower()
+    if not want:
+        return None
+    for c in columns:
+        if _strip_header(c).lower() == want:
+            return c
+    return None
+
+
+def iter_csv_batches(
+    path: str,
+    *,
+    text_column: str = "text",
+    id_column: str | None = None,
+    batch_size: int = 10_000,
+) -> Iterator[tuple[list[dict[str, Any]], list[str], int]]:
+    """Yield (items, errors, dropped_errors) per batch. Streams via Polars; never
+    loads the full file.
+
+    items have the same shape as `parse_csv_bytes`: {id, text, metadata}. The
+    returned `errors` list is capped per batch at PER_BATCH_ERROR_CAP entries
+    so a malformed multi-GB file cannot grow an unbounded list in memory; any
+    additional errors in the same batch are reported via `dropped_errors` so
+    the caller can keep an accurate total.
+    """
+    encoding, delimiter, transcoded_path = _peek_csv_meta(path)
+    read_path = transcoded_path or path
+
+    try:
+        # `infer_schema=False` forces every column to Utf8, matching the old
+        # `csv.DictReader` behavior where everything ends up as strings in
+        # `metadata`. We use `scan_csv().collect_batches()` because the older
+        # `read_csv_batched` API is deprecated in Polars 1.40+.
+        lf = pl.scan_csv(
+            read_path,
+            separator=delimiter,
+            encoding=encoding,
+            infer_schema=False,
+            has_header=True,
+            rechunk=False,
+            low_memory=True,
+        )
+
+        try:
+            columns = list(lf.collect_schema().keys())
+        except Exception as exc:  # noqa: BLE001 - surface as a clean ingest error
+            raise IngestError(f"Could not read CSV header: {exc}") from exc
+        if not columns:
+            raise IngestError("CSV has no header row")
+
+        text_key = _resolve_field_ci(columns, text_column)
+        if not text_key:
+            headers_fmt = ", ".join(repr(_strip_header(c)) for c in columns) or "(none)"
+            raise IngestError(
+                f"CSV missing required text column {text_column!r} (case-insensitive). "
+                f"Use the exact header of the body column \u2014 one name only. "
+                f"Found columns: {headers_fmt}"
+            )
+        id_key: str | None = None
+        if id_column:
+            id_key = _resolve_field_ci(columns, id_column)
+            if not id_key:
+                headers_fmt = (
+                    ", ".join(repr(_strip_header(c)) for c in columns) or "(none)"
+                )
+                raise IngestError(
+                    f"CSV missing id column {id_column!r} (case-insensitive). "
+                    f"Use a header name from the first row, not a row number. "
+                    f"Found columns: {headers_fmt}"
+                )
+        skip = {text_key}
+        if id_key:
+            skip.add(id_key)
+
+        def process(
+            batch: pl.DataFrame, start_row: int
+        ) -> tuple[list[dict[str, Any]], list[str], int]:
+            items: list[dict[str, Any]] = []
+            errors: list[str] = []
+            dropped = 0
+            for offset, row in enumerate(batch.iter_rows(named=True)):
+                row_no = start_row + offset
+                raw_body = row.get(text_key)
+                body = (raw_body or "").strip() if isinstance(raw_body, str) else ""
+                if not body:
+                    if len(errors) < PER_BATCH_ERROR_CAP:
+                        errors.append(f"row {row_no}: empty {text_key!r}")
+                    else:
+                        dropped += 1
+                    continue
+                if id_key:
+                    raw_id = row.get(id_key)
+                    doc_id = (raw_id or "").strip() if isinstance(raw_id, str) else ""
+                    if not doc_id:
+                        if len(errors) < PER_BATCH_ERROR_CAP:
+                            errors.append(f"row {row_no}: empty {id_key!r}")
+                        else:
+                            dropped += 1
+                        continue
+                else:
+                    doc_id = str(uuid.uuid4())
+                meta: dict[str, Any] = {}
+                for k, v in row.items():
+                    if k in skip:
+                        continue
+                    if v is None or v == "":
+                        continue
+                    meta[k] = v
+                items.append({"id": doc_id, "text": body, "metadata": meta})
+            return items, errors, dropped
+
+        # Row counter starts at 2 because row 1 is the header (matches existing UX).
+        next_row_no = 2
+        for batch in lf.collect_batches(chunk_size=batch_size, maintain_order=True):
+            items, errors, dropped = process(batch, next_row_no)
+            next_row_no += batch.height
+            yield items, errors, dropped
+    finally:
+        if transcoded_path:
+            try:
+                os.unlink(transcoded_path)
+            except OSError:
+                pass
 
 
 def parse_json_bytes(data: bytes) -> tuple[list[dict[str, Any]], list[str]]:

@@ -33,6 +33,9 @@ export default function ExplorePage() {
   const [csvIdColumn, setCsvIdColumn] = useState("");
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ loaded: number; total: number } | null>(
+    null,
+  );
   const [expandedTextIds, setExpandedTextIds] = useState<Set<string>>(() => new Set());
   const [tags, setTags] = useState<Tag[]>([]);
   const [tagsLoadError, setTagsLoadError] = useState<string | null>(null);
@@ -220,48 +223,93 @@ export default function ExplorePage() {
       setUploadMsg("Choose a file first.");
       return;
     }
+    if (!projectId) {
+      setUploadMsg("Pick a project first.");
+      return;
+    }
     setUploadMsg(null);
     setUploading(true);
+    setUploadProgress({ loaded: 0, total: file.size });
+
     const fd = new FormData();
     fd.append("file", file);
     const textCol = csvTextColumn.trim() || "text";
     fd.append("text_column", textCol);
     const idCol = csvIdColumn.trim();
     if (idCol) fd.append("id_column", idCol);
-    let res: Response;
+    // mlFetch normally injects project_id into the URL and form body, but we
+    // need XHR (not fetch) to get upload progress events for multi-GB files.
+    fd.append("project_id", projectId);
+
+    type UploadOk = {
+      inserted?: number;
+      skipped?: number;
+      errors?: string[];
+      truncated_errors_count?: number;
+    };
+    type UploadErr = { detail?: unknown };
+
     try {
-      res = await mlFetch("/api/ml/v1/documents/upload", { method: "POST", body: fd });
+      const result = await new Promise<{ status: number; body: UploadOk & UploadErr }>(
+        (resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          const url = `/api/ml/v1/documents/upload?project_id=${encodeURIComponent(projectId)}`;
+          xhr.open("POST", url, true);
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              setUploadProgress({ loaded: e.loaded, total: e.total });
+            }
+          };
+          xhr.onload = () => {
+            let parsed: unknown = null;
+            try {
+              parsed = JSON.parse(xhr.responseText || "null");
+            } catch {
+              /* leave null */
+            }
+            resolve({
+              status: xhr.status,
+              body: (parsed ?? {}) as UploadOk & UploadErr,
+            });
+          };
+          xhr.onerror = () => reject(new Error("Network error during upload"));
+          xhr.onabort = () => reject(new Error("Upload aborted"));
+          xhr.send(fd);
+        },
+      );
+
+      if (result.status < 200 || result.status >= 300) {
+        let detail = `Upload failed (HTTP ${result.status}).`;
+        const d = result.body.detail;
+        if (typeof d === "string") {
+          detail = d;
+        } else if (Array.isArray(d)) {
+          detail = d
+            .map((e: unknown) =>
+              typeof e === "object" && e && "msg" in e
+                ? String((e as { msg: string }).msg)
+                : JSON.stringify(e),
+            )
+            .join("; ");
+        }
+        setUploadMsg(detail);
+      } else {
+        const inserted = result.body.inserted ?? 0;
+        const updated = result.body.skipped ?? 0;
+        const warnings = (result.body.errors ?? []).length;
+        const dropped = result.body.truncated_errors_count ?? 0;
+        const warnSuffix =
+          dropped > 0 ? `${warnings + dropped} row warnings (showing ${warnings})` : `${warnings} row warnings`;
+        setUploadMsg(`Inserted ${inserted}, updated ${updated}. ${warnSuffix}.`);
+        setPendingFile(null);
+        await refresh();
+      }
     } catch (e) {
       setUploadMsg(describeMlFetchError(e));
+    } finally {
       setUploading(false);
-      return;
+      setUploadProgress(null);
     }
-    let payload: unknown = null;
-    try {
-      payload = await res.json();
-    } catch {
-      /* ignore */
-    }
-    const body = payload as { inserted?: number; skipped?: number; errors?: string[]; detail?: unknown };
-    if (!res.ok) {
-      let detail = `Upload failed (HTTP ${res.status}).`;
-      if (typeof body.detail === "string") {
-        detail = body.detail;
-      } else if (Array.isArray(body.detail)) {
-        detail = body.detail
-          .map((e: unknown) => (typeof e === "object" && e && "msg" in e ? String((e as { msg: string }).msg) : JSON.stringify(e)))
-          .join("; ");
-      }
-      setUploadMsg(detail);
-      setUploading(false);
-      return;
-    }
-    setUploadMsg(
-      `Inserted ${body.inserted ?? 0}, updated ${body.skipped ?? 0}. ${(body.errors ?? []).length} row warnings.`,
-    );
-    setUploading(false);
-    setPendingFile(null);
-    await refresh();
   };
 
   if (!hasActiveProject) {
@@ -342,6 +390,25 @@ export default function ExplorePage() {
             </span>
           ) : null}
         </div>
+        {uploading && uploadProgress ? (
+          <div className="mt-3 max-w-md">
+            <progress
+              className="h-2 w-full overflow-hidden rounded bg-ink-800 [&::-webkit-progress-bar]:bg-ink-800 [&::-webkit-progress-value]:bg-accent-500 [&::-moz-progress-bar]:bg-accent-500"
+              value={uploadProgress.loaded}
+              max={uploadProgress.total || 1}
+            />
+            <div className="mt-1 flex justify-between text-[11px] text-ink-500">
+              <span>
+                {formatBytes(uploadProgress.loaded)} / {formatBytes(uploadProgress.total)}
+              </span>
+              <span>
+                {uploadProgress.total
+                  ? `${Math.round((uploadProgress.loaded / uploadProgress.total) * 100)}%`
+                  : ""}
+              </span>
+            </div>
+          </div>
+        ) : null}
         {uploadMsg ? <div className="mt-2 text-xs text-ink-200">{uploadMsg}</div> : null}
       </section>
 
@@ -610,4 +677,16 @@ function bucketHint(b: LengthBucket) {
   if (b === "short") return "<100 chars";
   if (b === "medium") return "100–499 chars";
   return "500+ chars";
+}
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
