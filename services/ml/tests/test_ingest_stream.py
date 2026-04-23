@@ -1,16 +1,4 @@
-"""End-to-end tests for the streaming CSV ingest path.
-
-These exercise:
-- `iter_csv_batches` against a synthetic CSV that materializes on disk only
-  (never as a single Python bytes/str object), and
-- the `/v1/documents/upload` endpoint via FastAPI's TestClient, including the
-  cross-project ID collision behavior we promised to preserve.
-
-The "bounded memory" test generates a >100 MB file in `tmp_path` and asserts
-that peak Python heap allocation during a full streaming pass stays well below
-the file size. If someone accidentally re-introduces `file.read()` somewhere in
-the path, this test will fail loudly.
-"""
+# See docs/notes-ml.md (services/ml/tests/test_ingest_stream.py section) for what this file regression-guards.
 
 from __future__ import annotations
 
@@ -28,20 +16,12 @@ from app.main import app
 
 
 def _write_csv(path: Path, rows: int, body_chars: int = 200) -> int:
-    """Write a CSV with `rows` data lines. Returns the file size in bytes.
-
-    Uses simple ASCII so we exercise the fast UTF-8 path. Each row carries one
-    `text` column plus two metadata columns so we also cover metadata
-    extraction.
-    """
     body = "x" * body_chars
     size = 0
     with open(path, "w", encoding="utf-8", newline="") as fh:
         header = "id,text,sector,bucket\n"
         fh.write(header)
         size += len(header)
-        # Buffer ~64 KiB of rows at a time to keep the test fast without
-        # ballooning Python memory in the test process.
         buf: list[str] = []
         for i in range(rows):
             buf.append(f"row-{i},{body},alpha,b{i % 7}\n")
@@ -85,16 +65,10 @@ def test_iter_csv_batches_missing_text_column(tmp_path: Path) -> None:
     from app.ingest import IngestError
 
     with pytest.raises(IngestError):
-        # Pulling the first batch is enough to surface the validation error.
         next(iter(iter_csv_batches(str(csv_path), text_column="nope")))
 
 
 def test_iter_csv_batches_bounded_memory(tmp_path: Path) -> None:
-    """Stream a >100 MB CSV and assert peak Python heap stays modest.
-
-    The generator must not keep all rows in memory; if it does, this test will
-    flag the regression immediately.
-    """
     csv_path = tmp_path / "big.csv"
     file_size = _write_csv(csv_path, rows=500_000, body_chars=220)
     assert file_size > 100 * 1024 * 1024, (
@@ -113,9 +87,6 @@ def test_iter_csv_batches_bounded_memory(tmp_path: Path) -> None:
         tracemalloc.stop()
 
     assert rows == 500_000
-    # File is >100 MiB; if anything buffered the whole thing we'd be far above
-    # this threshold. 80 MiB leaves headroom for batch overhead and Polars
-    # internals while still catching "buffer everything" regressions.
     assert peak < 80 * 1024 * 1024, (
         f"peak Python allocation {peak} bytes exceeded streaming budget"
     )
@@ -147,8 +118,6 @@ def test_upload_endpoint_streams_csv(tmp_path: Path) -> None:
     assert body["errors"] == []
     assert body["truncated_errors_count"] == 0
 
-    # Re-upload the same file: every row should now hit the same-project
-    # update path (skipped count == 5000, no new inserts).
     with open(csv_path, "rb") as fh:
         res = client.post(
             "/v1/documents/upload",
@@ -175,7 +144,6 @@ def test_upload_endpoint_cross_project_collision_mints_new_id() -> None:
     assert res.status_code == 200, res.text
     assert res.json()["inserted"] == 1
 
-    # Same id, different project: should mint a fresh UUID rather than clobber p1.
     csv_body2 = "id,text\nshared-1,hello from p2\n"
     res = client.post(
         "/v1/documents/upload",
@@ -186,13 +154,11 @@ def test_upload_endpoint_cross_project_collision_mints_new_id() -> None:
     assert res.json()["inserted"] == 1
     assert res.json()["skipped"] == 0
 
-    # The original p1 row is intact.
     res = client.get(f"/v1/documents/shared-1")
     assert res.status_code == 200, res.text
     doc = res.json()
     assert doc["text"] == "hello from p1"
 
-    # And p2 has a row with the supplied text but a fresh (UUID) id.
     res = client.get(f"/v1/documents?project_id={p2}")
     assert res.status_code == 200, res.text
     items = res.json()["items"]
@@ -203,8 +169,6 @@ def test_upload_truncates_excess_errors(tmp_path: Path) -> None:
     client = TestClient(app)
     project_id = _make_project(client)
 
-    # 250 rows where every row has an empty text -> 250 errors. We cap returned
-    # errors at MAX_RETURNED_ERRORS (100); the rest must be reported as a count.
     lines = ["id,text"] + [f"row-{i}," for i in range(250)]
     csv_bytes = ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -222,15 +186,11 @@ def test_upload_truncates_excess_errors(tmp_path: Path) -> None:
 
 
 def test_upload_endpoint_accepts_part_larger_than_starlette_default(tmp_path: Path) -> None:
-    """Regression: Starlette's MultiPartParser defaults `max_part_size` to 1 MiB
-    and aborts the connection on any larger file part. The upload route must
-    raise that ceiling itself; otherwise multi-MB CSVs surface as ECONNRESET on
-    the proxy side. We send a ~5 MiB part to prove the limit was lifted."""
+    # See docs/notes-ml.md (services/ml/tests/test_ingest_stream.py section) for the Starlette 1 MiB regression context.
     client = TestClient(app)
     project_id = _make_project(client)
 
     csv_path = tmp_path / "above_limit.csv"
-    # ~5 MiB on disk: 25_000 rows * ~210 bytes each.
     file_size = _write_csv(csv_path, rows=25_000, body_chars=200)
     assert file_size > 2 * 1024 * 1024, "test setup should produce a >2 MiB part"
 
@@ -255,9 +215,6 @@ def test_unsupported_content_type_returns_400() -> None:
     assert res.status_code == 400
 
 
-# Keep a tracemalloc-related import side-effect from leaking if a test fails
-# mid-flight. tracemalloc.stop() in a finally above handles the happy path,
-# but pytest may abort earlier; this guards subsequent tests.
 @pytest.fixture(autouse=True)
 def _tracemalloc_off() -> None:
     if tracemalloc.is_tracing():

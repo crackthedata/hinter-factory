@@ -81,8 +81,6 @@ export default function StudioPage() {
     void loadTags();
   }, [loadTags, projectId]);
 
-  // Reset selected tag when switching projects so we don't keep a stale id
-  // pointing at a tag from another project.
   useEffect(() => {
     setSelectedTagId("");
     setLfs([]);

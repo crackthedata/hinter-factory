@@ -100,8 +100,7 @@ class LfRunVote(Base):
 
 
 class LfRunLabelingFunction(Base):
-    """Which labeling functions participated in a run (stable ordering for matrix columns)."""
-
+    # See docs/notes-ml.md#servicesmlappmodelspy for stable LF column ordering rationale.
     __tablename__ = "lf_run_labeling_functions"
     __table_args__ = (UniqueConstraint("run_id", "position"),)
 

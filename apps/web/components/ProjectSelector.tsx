@@ -30,7 +30,7 @@ export function ProjectSelector() {
         value={projectId ?? ""}
         onChange={(e) => {
           setProjectId(e.target.value);
-          // Force every page that reads project-scoped data to refetch.
+          // See docs/notes-web.md (apps/web/components/ProjectSelector.tsx section) for router.refresh() rationale.
           router.refresh();
         }}
         className="rounded-md border border-ink-700 bg-ink-950 px-2 py-1 text-sm text-white outline-none ring-accent-500 focus:ring-2"

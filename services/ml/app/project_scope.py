@@ -1,15 +1,4 @@
-"""Helpers to resolve and validate the active project for a request.
-
-All scoped routes accept `project_id` as a query (or form) parameter. It is
-**required** — there is no implicit fallback project anymore. If `project_id`
-is missing, callers get HTTP 400 with a clear message; if it doesn't match an
-existing project they get 404.
-
-The web client injects `project_id` automatically via
-`apps/web/lib/api.ts:projectScopeMiddleware` and `apps/web/lib/ml-fetch.ts`,
-sourced from the active project header. CLI/curl callers must pass it
-explicitly.
-"""
+# See docs/notes-ml.md#servicesmlappproject_scopepy for the mandatory-project_id contract.
 
 from __future__ import annotations
 

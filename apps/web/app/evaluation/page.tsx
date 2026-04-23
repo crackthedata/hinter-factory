@@ -31,8 +31,7 @@ type EvaluationVote = {
 type EvaluationRow = {
   document_id: string;
   text_preview: string;
-  // Full document body. Older API builds may not include it, so handle absence
-  // by falling back to text_preview in the renderer.
+  // See docs/notes-web.md (apps/web/app/evaluation/page.tsx section) for the older-API absence fallback.
   text?: string;
   gold: LfVote;
   predicted: LfVote;
@@ -135,7 +134,6 @@ export default function EvaluationPage() {
     () => new Set(["false_negative", "false_positive", "abstain_on_positive"]),
   );
 
-  // Reset selected tag/run on project switch.
   useEffect(() => {
     setTagId("");
     setRunId("");

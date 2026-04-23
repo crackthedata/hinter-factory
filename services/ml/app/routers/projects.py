@@ -1,11 +1,4 @@
-"""Projects: full-workspace scoping plus JSON export / import.
-
-The export format is a single JSON document containing the project metadata
-plus every record that belongs to it (documents, tags, labeling functions,
-gold labels, optional latest LF run with votes, and probabilistic labels).
-On import we always mint fresh UUIDs but preserve cross-record relationships
-via an in-memory id map; if the project name collides we suffix it.
-"""
+# See docs/notes-ml.md#servicesmlapproutersprojectspy for the export bundle shape and import re-mint policy.
 
 from __future__ import annotations
 
@@ -35,9 +28,6 @@ router = APIRouter(prefix="/v1/projects", tags=["projects"])
 
 EXPORT_FORMAT = "hinter-factory.project"
 EXPORT_VERSION = 1
-
-
-# --------------------------- CRUD ---------------------------
 
 
 @router.get("")
@@ -75,8 +65,6 @@ def delete_project(project_id: str, db: Annotated[Session, Depends(get_db)]):
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
-    # Cascade is configured on FKs; explicit children deletes keep things safe even
-    # when SQLite PRAGMA foreign_keys is OFF in some environments.
     for model in (
         ProbabilisticLabel,
         GoldLabel,
@@ -88,7 +76,6 @@ def delete_project(project_id: str, db: Annotated[Session, Depends(get_db)]):
         Document,
     ):
         if model is LfRunVote or model is LfRunLabelingFunction:
-            # These don't have project_id; delete via parent run
             run_ids = [
                 r.id
                 for r in db.scalars(select(LfRun).where(LfRun.project_id == project_id)).all()
@@ -106,9 +93,6 @@ def delete_project(project_id: str, db: Annotated[Session, Depends(get_db)]):
     db.delete(project)
     db.commit()
     return None
-
-
-# --------------------------- export ---------------------------
 
 
 @router.get("/{project_id}/export")
@@ -245,9 +229,6 @@ def export_project(
     }
 
 
-# --------------------------- import ---------------------------
-
-
 @router.post("/import", status_code=201)
 def import_project(
     payload: Annotated[dict, Body(...)],
@@ -314,7 +295,7 @@ def import_project(
     for lf in payload.get("labeling_functions") or []:
         old_tag_id = str(lf.get("tag_id") or "")
         if old_tag_id not in tag_id_map:
-            continue  # orphaned LF
+            continue
         new_id = str(uuid.uuid4())
         lf_id_map[str(lf.get("id") or "")] = new_id
         db.add(
@@ -419,9 +400,6 @@ def import_project(
     db.refresh(project)
     counts = _project_counts(db, project.id)
     return {**_serialize(project), "counts": counts}
-
-
-# --------------------------- helpers ---------------------------
 
 
 def _serialize(p: Project) -> dict:

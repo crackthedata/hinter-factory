@@ -13,10 +13,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import String, cast, func, or_, select, text
 from sqlalchemy.orm import Session
-# Important: use Starlette's UploadFile (not fastapi.UploadFile) for the
-# isinstance check. fastapi.UploadFile is a subclass; instances returned by
-# request.form() are the Starlette base class, so checking against the FastAPI
-# subclass would always fail.
+# Use Starlette's UploadFile, not fastapi.UploadFile — see docs/notes-ml.md#servicesmlapproutersdocumentspy.
 from starlette.datastructures import UploadFile
 
 from app.database import get_db
@@ -24,31 +21,16 @@ from app.ingest import IngestError, iter_csv_batches, parse_csv_bytes, parse_jso
 from app.models import Document
 from app.project_scope import resolve_project_id
 
-# Cap how many per-row warnings we return to the client. A malformed multi-GB
-# CSV can otherwise produce a multi-megabyte JSON response that no UI can show.
+# See docs/notes-ml.md#servicesmlapproutersdocumentspy for tuning constants and Starlette upload-cap rationale.
 MAX_RETURNED_ERRORS = 100
-
-# How many CSV rows we batch into a single executemany call. Big enough to
-# amortize SQLite overhead, small enough that one batch fits comfortably in RAM
-# even for very wide rows.
 INGEST_BATCH_SIZE = 10_000
-
-# When we look up which incoming IDs already exist, we chunk the IN(...) query
-# below SQLite's default 999-parameter limit.
 ID_LOOKUP_CHUNK = 500
-
-# Starlette's MultiPartParser defaults max_part_size to 1 MiB and rejects any
-# file part larger than that with MultiPartException, which uvicorn surfaces as
-# a dropped connection (ECONNRESET on the proxy side). For our streaming
-# upload we want effectively no limit; file parts spool to disk via
-# SpooledTemporaryFile regardless of this number, so memory stays bounded.
-MAX_UPLOAD_PART_SIZE = 1024 * 1024 * 1024 * 64  # 64 GiB ceiling
+MAX_UPLOAD_PART_SIZE = 1024 * 1024 * 1024 * 64
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
 
 
 def _should_parse_as_csv(filename: str | None, content_type: str | None) -> bool:
-    """Detect CSV uploads; Windows/Excel often omits 'csv' from Content-Type."""
     name = (filename or "").lower()
     ct = (content_type or "").lower()
     if name.endswith(".json"):
@@ -57,7 +39,6 @@ def _should_parse_as_csv(filename: str | None, content_type: str | None) -> bool
         return True
     if "csv" in ct or ct == "text/csv":
         return True
-    # Excel on Windows frequently labels comma-separated exports as:
     if ct in ("application/vnd.ms-excel", "application/vnd.ms-excel.sheet.macroenabled.12"):
         return True
     if ct in ("text/plain", "application/octet-stream") and name.endswith(".csv"):
@@ -88,7 +69,6 @@ def _validate_metadata_key(key: str) -> str:
 
 
 def _truncate_errors(errors: list[str], total_so_far: int) -> tuple[list[str], int]:
-    """Keep only the first MAX_RETURNED_ERRORS messages; report the dropped count."""
     if total_so_far + len(errors) <= MAX_RETURNED_ERRORS:
         return errors, 0
     keep = max(0, MAX_RETURNED_ERRORS - total_so_far)
@@ -97,20 +77,15 @@ def _truncate_errors(errors: list[str], total_so_far: int) -> tuple[list[str], i
 
 
 def _apply_bulk_pragmas(cur) -> None:
-    """Tune SQLite for a long bulk write. WAL is persistent on the DB file;
-    the others are per-connection and may leak back to the pool, which is
-    acceptable for this dev tool (slightly faster, slightly less durable)."""
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA synchronous=NORMAL")
     cur.execute("PRAGMA temp_store=MEMORY")
-    cur.execute("PRAGMA cache_size=-200000")  # negative = KiB; ~200 MiB page cache
+    cur.execute("PRAGMA cache_size=-200000")
 
 
 def _existing_ids_by_project(
     cur, ids: list[str]
 ) -> dict[str, str]:
-    """Return {document_id: project_id} for the supplied ids, chunked to stay
-    under SQLite's parameter limit."""
     found: dict[str, str] = {}
     for i in range(0, len(ids), ID_LOOKUP_CHUNK):
         chunk = ids[i : i + ID_LOOKUP_CHUNK]
@@ -127,13 +102,7 @@ def _existing_ids_by_project(
 def _write_batch(
     cur, project_id: str, items: list[dict[str, Any]]
 ) -> tuple[int, int]:
-    """Upsert one batch. Returns (inserted_count, updated_count).
-
-    Preserves the existing semantics:
-      - same id, same project   -> UPDATE in place
-      - same id, other project  -> mint a fresh UUID and INSERT
-      - new id                  -> INSERT with the supplied id
-    """
+    # See docs/notes-ml.md#servicesmlapproutersdocumentspy for upsert semantics.
     if not items:
         return 0, 0
 
@@ -153,8 +122,6 @@ def _write_batch(
         elif existing_pid == project_id:
             updates.append((body, meta_json, char_len, it["id"], project_id))
         else:
-            # cross-project id collision: re-mint rather than clobber the other
-            # project's row.
             inserts.append((str(uuid.uuid4()), project_id, body, meta_json, char_len, now_iso))
 
     if inserts:
@@ -173,12 +140,8 @@ def _write_batch(
 
 
 def _spool_upload_to_disk(file: UploadFile, suffix: str) -> str:
-    """Copy the upload to a real on-disk temp file in 1 MiB chunks. Never
-    materializes the full body in Python memory; relies on Starlette's
-    UploadFile already being a SpooledTemporaryFile that spills to disk."""
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     try:
-        # rewind in case anything has consumed the stream
         try:
             file.file.seek(0)
         except Exception:  # noqa: BLE001 - some file-likes don't support seek
@@ -198,16 +161,10 @@ def _ingest_sync(
     text_column: str,
     id_column: str | None,
 ) -> dict[str, Any]:
-    """Run the streaming ingest synchronously. This is the CPU/IO-heavy path
-    that the async route offloads to a worker thread."""
-    # Release any read-lock the SA session may be holding before we start a
-    # long-running write transaction on the underlying connection. WAL mode
-    # (set below) means readers won't block this writer either way, but this
-    # keeps the session's view consistent.
     db.commit()
 
     sa_conn = db.connection()
-    raw_conn = sa_conn.connection  # DBAPI connection (sqlite3.Connection wrapper)
+    raw_conn = sa_conn.connection
     cur = raw_conn.cursor()
     _apply_bulk_pragmas(cur)
 
@@ -219,9 +176,6 @@ def _ingest_sync(
 
     try:
         if is_json:
-            # JSON path stays buffered: the JSON parser needs the whole document
-            # anyway, so streaming wouldn't help. For very large JSON, callers
-            # should convert to CSV.
             raw = upload.file.read()
             try:
                 items, errors = parse_json_bytes(raw)
@@ -271,8 +225,6 @@ def _ingest_sync(
 
     return {
         "inserted": inserted_total,
-        # Field name kept as `skipped` for backward compatibility with the
-        # existing UI; semantically it's "rows that updated an existing doc".
         "skipped": updated_total,
         "errors": returned_errors,
         "truncated_errors_count": dropped_errors,
@@ -285,14 +237,9 @@ async def upload_documents(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
 ):
-    # We bypass FastAPI's `File(...)` / `Form(...)` parameters because they
-    # call `request.form()` with the default `max_part_size=1 MiB`. Any file
-    # upload larger than 1 MiB would otherwise raise MultiPartException and
-    # uvicorn would drop the socket (the client sees ECONNRESET). Calling
-    # `request.form()` ourselves lets us raise the per-part ceiling.
     try:
         form = await request.form(max_part_size=MAX_UPLOAD_PART_SIZE)
-    except Exception as exc:  # noqa: BLE001 - report any parse failure cleanly
+    except Exception as exc:  # noqa: BLE001 - report any multipart parse failure cleanly
         raise HTTPException(
             status_code=400, detail=f"could not parse multipart upload: {exc}"
         ) from exc
@@ -307,8 +254,6 @@ async def upload_documents(
     id_column = id_column_raw if isinstance(id_column_raw, str) and id_column_raw else None
     project_id_raw = form.get("project_id")
     project_id_form = project_id_raw if isinstance(project_id_raw, str) else None
-    # Accept project_id from either the form body or the query string; the web
-    # client now passes it both ways.
     project_id = project_id_form or request.query_params.get("project_id")
 
     project_id = resolve_project_id(db, project_id)
@@ -326,9 +271,6 @@ async def upload_documents(
             ),
         )
 
-    # The ingest is sync (Polars + SQLite executemany). Run it in a worker
-    # thread so the event loop stays responsive for other requests during the
-    # multi-minute write of a multi-GB file.
     return await asyncio.to_thread(
         _ingest_sync,
         db,

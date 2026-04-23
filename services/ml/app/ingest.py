@@ -20,7 +20,7 @@ PER_BATCH_ERROR_CAP = 100
 
 
 def _decode_csv_text(data: bytes) -> str:
-    """Decode CSV bytes; Windows/Excel often emits UTF-16-LE or legacy Windows encodings."""
+    # See docs/notes-ml.md#servicesmlappingestpy for encoding-detection rationale.
     if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
         return data.decode("utf-16")
     try:
@@ -41,7 +41,6 @@ def _strip_header(name: str | None) -> str:
 
 
 def _sniff_delimiter(sample_line: str) -> str:
-    """Pick a delimiter when Excel uses semicolons (common in EU locales)."""
     if not sample_line.strip():
         return ","
     commas = sample_line.count(",")
@@ -55,7 +54,6 @@ def _sniff_delimiter(sample_line: str) -> str:
 
 
 def _resolve_field(fieldnames: list[str] | None, requested: str) -> str | None:
-    """Match requested column name case-insensitively and ignoring BOM/whitespace on headers."""
     if not fieldnames:
         return None
     want = _strip_header(requested).lower()
@@ -136,25 +134,16 @@ def parse_csv_bytes(
 
 
 def _peek_csv_meta(path: str, sample_bytes: int = 64 * 1024) -> tuple[str, str, str | None]:
-    """Sniff (encoding_for_polars, delimiter, transcoded_path).
-
-    Returns the encoding string to pass to Polars (either "utf8" or "utf8-lossy"),
-    the detected delimiter, and an optional path to a transcoded UTF-8 temp file
-    (set when the source is UTF-16, which Polars cannot read directly). The caller
-    owns the transcoded file and must unlink it.
-    """
+    # See docs/notes-ml.md#servicesmlappingestpy for the UTF-16 transcoding strategy.
     with open(path, "rb") as fh:
         head = fh.read(sample_bytes)
 
     if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
-        # Polars has no native UTF-16 reader; transcode to a UTF-8 temp file.
-        # Streaming transcode keeps memory bounded even for very large inputs.
         transcoded = tempfile.NamedTemporaryFile(
             mode="wb", delete=False, suffix=".utf8.csv"
         )
         try:
             with open(path, "rb") as src:
-                # codecs.iterdecode wraps the byte stream; we re-encode chunk-by-chunk.
                 import codecs
 
                 decoder = codecs.getincrementaldecoder("utf-16")()
@@ -170,7 +159,6 @@ def _peek_csv_meta(path: str, sample_bytes: int = 64 * 1024) -> tuple[str, str, 
                     transcoded.write(tail.encode("utf-8"))
         finally:
             transcoded.close()
-        # Re-sniff delimiter from the transcoded file.
         with open(transcoded.name, "rb") as fh:
             new_head = fh.read(sample_bytes)
         sample_text = new_head.decode("utf-8", errors="replace")
@@ -181,7 +169,6 @@ def _peek_csv_meta(path: str, sample_bytes: int = 64 * 1024) -> tuple[str, str, 
     first_line = sample_text.splitlines()[0] if sample_text else ""
     delimiter = _sniff_delimiter(first_line)
 
-    # Polars accepts "utf8" and "utf8-lossy". UTF-8-with-BOM works under "utf8".
     try:
         head.decode("utf-8-sig")
         encoding = "utf8"
@@ -207,23 +194,11 @@ def iter_csv_batches(
     id_column: str | None = None,
     batch_size: int = 10_000,
 ) -> Iterator[tuple[list[dict[str, Any]], list[str], int]]:
-    """Yield (items, errors, dropped_errors) per batch. Streams via Polars; never
-    loads the full file.
-
-    items have the same shape as `parse_csv_bytes`: {id, text, metadata}. The
-    returned `errors` list is capped per batch at PER_BATCH_ERROR_CAP entries
-    so a malformed multi-GB file cannot grow an unbounded list in memory; any
-    additional errors in the same batch are reported via `dropped_errors` so
-    the caller can keep an accurate total.
-    """
+    # See docs/notes-ml.md#servicesmlappingestpy for streaming + per-batch error-cap rationale.
     encoding, delimiter, transcoded_path = _peek_csv_meta(path)
     read_path = transcoded_path or path
 
     try:
-        # `infer_schema=False` forces every column to Utf8, matching the old
-        # `csv.DictReader` behavior where everything ends up as strings in
-        # `metadata`. We use `scan_csv().collect_batches()` because the older
-        # `read_csv_batched` API is deprecated in Polars 1.40+.
         lf = pl.scan_csv(
             read_path,
             separator=delimiter,
@@ -236,7 +211,7 @@ def iter_csv_batches(
 
         try:
             columns = list(lf.collect_schema().keys())
-        except Exception as exc:  # noqa: BLE001 - surface as a clean ingest error
+        except Exception as exc:  # noqa: BLE001 - surface any Polars failure as a clean IngestError
             raise IngestError(f"Could not read CSV header: {exc}") from exc
         if not columns:
             raise IngestError("CSV has no header row")
@@ -302,7 +277,6 @@ def iter_csv_batches(
                 items.append({"id": doc_id, "text": body, "metadata": meta})
             return items, errors, dropped
 
-        # Row counter starts at 2 because row 1 is the header (matches existing UX).
         next_row_no = 2
         for batch in lf.collect_batches(chunk_size=batch_size, maintain_order=True):
             items, errors, dropped = process(batch, next_row_no)

@@ -4,14 +4,7 @@ import Link from "next/link";
 
 import { useProject } from "@/lib/project-context";
 
-/**
- * Render an instructional empty state when there is no active project. Pages
- * that depend on project-scoped data should mount this above their content
- * and skip their own data fetches when the user has no project selected.
- *
- * Returns `null` while the project list is still loading so we don't flash
- * the empty state during initial hydration.
- */
+// See docs/notes-web.md (apps/web/components/NoProjectGate.tsx section) for the loading vs warning branch behavior.
 export function NoProjectGate({ pageName }: { pageName: string }) {
   const { loading, projects } = useProject();
   if (loading && !projects.length) {

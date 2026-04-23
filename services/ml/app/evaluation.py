@@ -1,15 +1,4 @@
-"""Evaluate an LF run against gold labels for a tag.
-
-The "validation set" is implicitly defined as every document the user has
-gold-labeled for the chosen tag, with gold value != 0. Gold value 0 means the
-labeler explicitly abstained, so it is excluded from precision/recall but still
-reported in the totals.
-
-Aggregation: per (document, tag) we sum the LF votes from the run. Sum > 0
-predicts +1 (positive for tag), sum < 0 predicts -1 (negative), sum == 0
-abstains. This matches the matrix already exposed by /v1/lf-runs/{id}/matrix
-without introducing a probabilistic label model.
-"""
+# See docs/notes-ml.md#servicesmlappevaluationpy for the full rationale.
 
 from __future__ import annotations
 
@@ -61,7 +50,6 @@ def categorize(gold: int, predicted: int) -> Category:
         if predicted == -1:
             return "false_negative"
         return "abstain_on_positive"
-    # gold == -1
     if predicted == 1:
         return "false_positive"
     if predicted == -1:
@@ -91,7 +79,7 @@ class EvaluationRow:
 @dataclass
 class EvaluationSummary:
     total_gold: int
-    considered: int  # gold != 0
+    considered: int
     true_positive: int
     true_negative: int
     false_positive: int
@@ -102,7 +90,7 @@ class EvaluationSummary:
     precision: float | None
     recall: float | None
     f1: float | None
-    coverage: float | None  # fraction of considered docs where prediction != 0
+    coverage: float | None
 
 
 def _safe_div(num: float, den: float) -> float | None:
@@ -166,7 +154,7 @@ def evaluate_run(
     for g in gold_rows:
         doc = docs.get(g.document_id)
         if doc is None:
-            continue  # gold for a deleted doc; ignore
+            continue
         doc_votes = votes_by_doc.get(g.document_id, [])
         vote_sum = sum(int(v.vote) for v in doc_votes)
         if vote_sum > 0:
@@ -212,7 +200,7 @@ def evaluate_run(
     abstain_neg = counts["abstain_on_negative"]
     gold_abstain = counts["gold_abstain"]
     considered = tp + tn + fp + fn + abstain_pos + abstain_neg
-    fn_total = fn + abstain_pos  # missed positives, including abstains
+    fn_total = fn + abstain_pos
     precision = _safe_div(tp, tp + fp)
     recall = _safe_div(tp, tp + fn_total)
     if precision is None or recall is None or (precision + recall) == 0:
@@ -237,7 +225,6 @@ def evaluate_run(
         coverage=coverage,
     )
 
-    # Order: errors first (FP, FN, abstain_on_positive), then the rest.
     priority = {
         "false_positive": 0,
         "false_negative": 1,

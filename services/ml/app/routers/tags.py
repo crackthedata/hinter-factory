@@ -35,10 +35,7 @@ def create_tag(
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
     taxonomy_version = str(payload.get("taxonomy_version") or "v1")
-    # Project may arrive as a query param (the web client injects it that way
-    # via projectScopeMiddleware) or, for backwards compatibility, as a body
-    # field used by import flows. Query param wins so the active project from
-    # the UI header is respected.
+    # See docs/notes-ml.md#servicesmlapprouterstagspy for query-vs-body project_id precedence.
     project_id = resolve_project_id(db, project_id or payload.get("project_id"))
     existing = db.scalar(
         select(Tag).where(Tag.project_id == project_id, Tag.name == name)

@@ -9,7 +9,6 @@ from app.main import app
 
 
 def _ingest(client: TestClient, csv: str, project_id: str) -> dict[str, str]:
-    """Ingest CSV into the given project; return text -> document_id."""
     files = {"file": ("docs.csv", io.BytesIO(csv.encode("utf-8")), "text/csv")}
     data: dict[str, str] = {"text_column": "text", "project_id": project_id}
     res = client.post("/v1/documents/upload", files=files, data=data)
@@ -26,8 +25,7 @@ def _new_project(client: TestClient, prefix: str = "Proj") -> str:
 
 
 def test_scoped_endpoints_reject_calls_without_project_id() -> None:
-    """With Default removed, every scoped endpoint must 400 when project_id
-    is omitted instead of silently using a fallback project."""
+    # See docs/notes-ml.md (services/ml/tests/test_projects.py section): no more "Default" fallback.
     client = TestClient(app)
     res = client.get("/v1/documents")
     assert res.status_code == 400
@@ -52,28 +50,22 @@ def test_projects_are_isolated_and_share_tag_names() -> None:
     [beta_doc_id] = list(beta_docs.values())
     assert alpha_doc_id != beta_doc_id
 
-    # Listing each project should not bleed.
     res = client.get("/v1/documents", params={"project_id": alpha_id})
     assert {d["id"] for d in res.json()["items"]} == {alpha_doc_id}
     res = client.get("/v1/documents", params={"project_id": beta_id})
     assert {d["id"] for d in res.json()["items"]} == {beta_doc_id}
 
-    # Same tag name in two projects is allowed.
     res = client.post(f"/v1/tags?project_id={alpha_id}", json={"name": "is_topic"})
     assert res.status_code == 201, res.text
     res = client.post(f"/v1/tags?project_id={beta_id}", json={"name": "is_topic"})
     assert res.status_code == 201, res.text
 
-    # Duplicates within the same project still rejected.
     res = client.post(f"/v1/tags?project_id={alpha_id}", json={"name": "is_topic"})
     assert res.status_code == 409
 
 
 def test_create_tag_honors_project_id_query_parameter() -> None:
-    """The web client injects project_id via the URL query string (see
-    apps/web/lib/api.ts projectScopeMiddleware), not the JSON body. Make sure
-    the POST handler reads from the query so a tag actually lands in the
-    intended project."""
+    # See docs/notes-ml.md (services/ml/tests/test_projects.py section): query-param project_id is what the web client uses.
     client = TestClient(app)
     alpha_id = _new_project(client, "AlphaQry")
     beta_id = _new_project(client, "BetaQry")
@@ -87,21 +79,18 @@ def test_create_tag_honors_project_id_query_parameter() -> None:
     assert res.status_code == 200
     assert any(t["name"] == tag_name for t in res.json())
 
-    # And it must NOT be visible in the other project.
     res = client.get("/v1/tags", params={"project_id": alpha_id})
     assert res.status_code == 200
     assert all(t["name"] != tag_name for t in res.json())
 
 
 def test_any_project_can_be_deleted() -> None:
-    """With the Default-project guard removed, every project — including one
-    that happens to be named 'Default' — can be deleted via the API."""
+    # See docs/notes-ml.md (services/ml/tests/test_projects.py section): no Default-project guard anymore.
     client = TestClient(app)
     res = client.post("/v1/projects", json={"name": f"Default_{uuid.uuid4().hex[:6]}"})
     assert res.status_code == 201, res.text
     pid = res.json()["id"]
 
-    # Give it some scoped data so we exercise the cascade.
     _ingest(client, "text\nthrowaway\n", project_id=pid)
     res = client.post(f"/v1/tags?project_id={pid}", json={"name": "doomed"})
     assert res.status_code == 201
@@ -109,7 +98,6 @@ def test_any_project_can_be_deleted() -> None:
     res = client.delete(f"/v1/projects/{pid}")
     assert res.status_code == 204
 
-    # Verify it's gone.
     res = client.get("/v1/projects")
     assert all(p["id"] != pid for p in res.json())
 
@@ -157,7 +145,6 @@ def test_export_then_import_roundtrips_full_workspace() -> None:
         )
         assert res.status_code == 201, res.text
 
-    # Export.
     res = client.get(f"/v1/projects/{src_id}/export")
     assert res.status_code == 200, res.text
     bundle = res.json()
@@ -169,7 +156,6 @@ def test_export_then_import_roundtrips_full_workspace() -> None:
     assert len(bundle["lf_runs"]) == 1
     assert len(bundle["lf_runs"][0]["votes"]) == 2
 
-    # Import into a new project (auto-suffixes name on collision).
     res = client.post("/v1/projects/import", json=bundle)
     assert res.status_code == 201, res.text
     imported = res.json()
@@ -185,7 +171,6 @@ def test_export_then_import_roundtrips_full_workspace() -> None:
     new_id = imported["id"]
     assert new_id != src_id
 
-    # IDs must have been re-minted but relations preserved: evaluation should work.
     res = client.get("/v1/tags", params={"project_id": new_id})
     assert res.status_code == 200
     new_tag = res.json()[0]

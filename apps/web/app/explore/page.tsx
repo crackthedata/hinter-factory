@@ -48,8 +48,6 @@ export default function ExplorePage() {
 
   const PAGE_SIZE_OPTIONS = [25, 50, 100, 200, 500] as const;
 
-  // Reset to the first page whenever filters or page size change. The user is
-  // looking at a different result set, so jumping to the middle would be confusing.
   useEffect(() => {
     setPageIndex(0);
   }, [q, buckets, metaKey, metaValue, pageSize, projectId]);
@@ -237,8 +235,7 @@ export default function ExplorePage() {
     fd.append("text_column", textCol);
     const idCol = csvIdColumn.trim();
     if (idCol) fd.append("id_column", idCol);
-    // mlFetch normally injects project_id into the URL and form body, but we
-    // need XHR (not fetch) to get upload progress events for multi-GB files.
+    // See docs/notes-web.md (apps/web/app/explore/page.tsx section): XHR + manual project_id injection for upload progress.
     fd.append("project_id", projectId);
 
     type UploadOk = {
