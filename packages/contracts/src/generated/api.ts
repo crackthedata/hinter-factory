@@ -154,6 +154,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/documents/label-priority": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List unlabeled documents ranked for active learning
+         * @description Returns unlabeled documents (no gold label for the given tag) ordered by an active-learning priority. Modes:
+         *       - `uncertain`: smallest |vote_sum| first, ties broken by higher
+         *         vote_count (closest splits surface first).
+         *       - `no_lf_fires`: documents the latest run produced zero votes for —
+         *         coverage holes that need labels to measure recall.
+         *       - `weak_positive`: predicted positive on a single LF vote — the most
+         *         likely false positives.
+         *     Uses the latest *completed* LF run for the tag unless `run_id` is provided. Same `q`, `length_bucket`, `metadata_*` filters as `listDocuments`.
+         */
+        get: operations["listLabelPriority"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/documents/coverage-stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Estimate recall ceiling from LF coverage on a sample
+         * @description Samples the project's documents (deterministically, ORDER BY id LIMIT N) and reports what fraction of them produced no LF votes in the latest completed run. `estimated_recall_ceiling = 1 - no_lf_fires_rate` is the upper bound on true-positive recall achievable with the current LFs.
+         */
+        get: operations["getCoverageStats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/tags": {
         parameters: {
             query?: never;
@@ -212,6 +259,23 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["previewLabelingFunction"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/labeling-functions/suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Suggest candidate keyword labeling functions for a tag, mined from gold-labeled documents (when present), the corpus, and the tag name. Tokens already covered by an existing keywords or regex LF for the tag are filtered out so the panel only proposes new coverage. */
+        get: operations["suggestLabelingFunctions"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -499,6 +563,86 @@ export interface components {
         };
         LabelingFunctionPreviewResponse: {
             rows: components["schemas"]["LabelingFunctionPreviewRow"][];
+        };
+        HinterSuggestion: {
+            /** @description Lowercase token proposed as a single-keyword labeling function. */
+            keyword: string;
+            /**
+             * Format: float
+             * @description Heuristic ranking score; higher is more confident.
+             */
+            score: number;
+            /** @description Distinct gold-positive documents containing the token. */
+            positive_hits: number;
+            /** @description Distinct gold-negative documents containing the token. */
+            negative_hits: number;
+            /** @description Up to a few document ids that contain the token. */
+            example_document_ids: string[];
+        };
+        /**
+         * @description Which signal drove the ranking. `gold` = gold labels only, `tag_name` = cold-start (no gold labels), `mixed` = gold labels plus tag-name boost.
+         * @enum {string}
+         */
+        HinterSuggestionsBasis: "gold" | "tag_name" | "mixed";
+        HinterSuggestionsResponse: {
+            tag_id: string;
+            /** Format: date-time */
+            generated_at: string;
+            basis: components["schemas"]["HinterSuggestionsBasis"];
+            suggestions: components["schemas"]["HinterSuggestion"][];
+        };
+        /**
+         * @description Active-learning ordering. `uncertain` ranks by smallest |vote_sum| first (closest splits surface first). `no_lf_fires` lists docs the latest run produced zero votes for. `weak_positive` lists docs predicted positive on a single LF vote.
+         * @enum {string}
+         */
+        LabelPriorityMode: "uncertain" | "no_lf_fires" | "weak_positive";
+        LabelPriorityVote: {
+            labeling_function_id: string;
+            labeling_function_name: string;
+            vote: components["schemas"]["LfVote"];
+        };
+        LabelPriorityRow: {
+            id: string;
+            text: string;
+            metadata: {
+                [key: string]: unknown;
+            };
+            char_length: number;
+            /** Format: date-time */
+            created_at: string;
+            /** @description Sum of LF votes (-1/0/+1) cast on this doc in the run. */
+            vote_sum: number;
+            /** @description Number of LFs that voted (non-zero) on this doc. */
+            vote_count: number;
+            votes: components["schemas"]["LabelPriorityVote"][];
+        };
+        LabelPriorityResponse: {
+            /** @description LF run the priority was computed against. Null when no run exists. */
+            run_id: string | null;
+            mode: components["schemas"]["LabelPriorityMode"];
+            /** @description Total docs matching the mode + filters before pagination. */
+            total: number;
+            items: components["schemas"]["LabelPriorityRow"][];
+            /** @description Human-readable hint when the result is empty (e.g. no run yet). */
+            message?: string | null;
+        };
+        CoverageStatsResponse: {
+            tag_id: string;
+            run_id?: string | null;
+            /** @description Actual number of documents in the sample (<= requested). */
+            sample_size: number;
+            /** @description Documents in the sample that produced zero LF votes. */
+            sample_no_lf_fires: number;
+            /** Format: float */
+            no_lf_fires_rate?: number | null;
+            /**
+             * Format: float
+             * @description 1 - no_lf_fires_rate. Upper bound on recall achievable by current LFs.
+             */
+            estimated_recall_ceiling?: number | null;
+            /** @description How many of the sampled docs already have a gold label for this tag. */
+            sample_with_gold: number;
+            message?: string | null;
         };
         /**
          * @description 1 positive for tag, -1 negative, 0 abstain
@@ -962,6 +1106,83 @@ export interface operations {
             };
         };
     };
+    listLabelPriority: {
+        parameters: {
+            query: {
+                project_id?: string;
+                tag_id: string;
+                mode?: components["schemas"]["LabelPriorityMode"];
+                run_id?: string;
+                q?: string;
+                length_bucket?: components["schemas"]["LengthBucket"][];
+                metadata_key?: string;
+                metadata_value?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LabelPriorityResponse"];
+                };
+            };
+            /** @description bad mode or filter */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description tag not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getCoverageStats: {
+        parameters: {
+            query: {
+                project_id?: string;
+                tag_id: string;
+                run_id?: string;
+                sample_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoverageStatsResponse"];
+                };
+            };
+            /** @description tag not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     listTags: {
         parameters: {
             query?: {
@@ -1134,6 +1355,47 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["LabelingFunctionPreviewResponse"];
                 };
+            };
+        };
+    };
+    suggestLabelingFunctions: {
+        parameters: {
+            query: {
+                tag_id: string;
+                /** @description Project the tag belongs to. Required at runtime; marked optional so the web client's openapi-fetch middleware can inject it. */
+                project_id?: string;
+                limit?: number;
+                /** @description Tokens to treat as already-covered (in addition to existing LFs). Repeat the parameter for multiple values, e.g. `?exclude=foo&exclude=bar`. Used by the UI to thread dismissed suggestions back so a refresh surfaces fresh candidates instead of the same ones. */
+                exclude?: string[];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HinterSuggestionsResponse"];
+                };
+            };
+            /** @description project_id or tag_id missing */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description tag not found in project */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -10,6 +10,7 @@ from app.database import get_db
 from app.lf_executor import LfConfigError, execute_labeling_function
 from app.models import Document, LabelingFunction, Tag
 from app.project_scope import resolve_project_id
+from app.suggestions import suggest_keywords_for_tag
 
 router = APIRouter(prefix="/v1/labeling-functions", tags=["labelingFunctions"])
 
@@ -30,6 +31,54 @@ def list_labeling_functions(
     stmt = stmt.order_by(LabelingFunction.created_at.desc())
     rows = db.scalars(stmt).all()
     return [_serialize(lf) for lf in rows]
+
+
+@router.get("/suggestions")
+def suggest_labeling_functions(
+    db: Annotated[Session, Depends(get_db)],
+    tag_id: str,
+    project_id: str | None = None,
+    limit: int = 10,
+    exclude: Annotated[
+        list[str] | None,
+        Query(
+            description=(
+                "Tokens to treat as already-covered (in addition to existing "
+                "LFs). Repeat the parameter for multiple values, e.g. "
+                "?exclude=foo&exclude=bar. Used by the UI to thread dismissed "
+                "suggestions back so a refresh surfaces fresh candidates."
+            ),
+        ),
+    ] = None,
+):
+    project_id = resolve_project_id(db, project_id)
+    if not tag_id:
+        raise HTTPException(status_code=400, detail="tag_id is required")
+    tag = db.get(Tag, tag_id)
+    if not tag or tag.project_id != project_id:
+        raise HTTPException(status_code=404, detail="tag not found")
+    result = suggest_keywords_for_tag(
+        db,
+        project_id=project_id,
+        tag_id=tag_id,
+        limit=limit,
+        exclude=exclude,
+    )
+    return {
+        "tag_id": result.tag_id,
+        "generated_at": result.generated_at.isoformat() + "Z",
+        "basis": result.basis,
+        "suggestions": [
+            {
+                "keyword": s.keyword,
+                "score": s.score,
+                "positive_hits": s.positive_hits,
+                "negative_hits": s.negative_hits,
+                "example_document_ids": s.example_document_ids,
+            }
+            for s in result.suggestions
+        ],
+    }
 
 
 @router.post("", status_code=201)

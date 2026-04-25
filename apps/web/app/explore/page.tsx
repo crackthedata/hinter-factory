@@ -15,6 +15,12 @@ type LengthBucket = components["schemas"]["LengthBucket"];
 type Tag = components["schemas"]["Tag"];
 type LfVote = components["schemas"]["LfVote"];
 type GoldLabel = components["schemas"]["GoldLabel"];
+type LabelPriorityMode = components["schemas"]["LabelPriorityMode"];
+type LabelPriorityRow = components["schemas"]["LabelPriorityRow"];
+type LabelPriorityResponse = components["schemas"]["LabelPriorityResponse"];
+type CoverageStatsResponse = components["schemas"]["CoverageStatsResponse"];
+
+type PriorityModeChoice = "off" | LabelPriorityMode;
 
 export default function ExplorePage() {
   const { projectId, hasActiveProject } = useProject();
@@ -45,12 +51,28 @@ export default function ExplorePage() {
   const [goldMsg, setGoldMsg] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(50);
   const [pageIndex, setPageIndex] = useState(0);
+  const [priorityMode, setPriorityMode] = useState<PriorityModeChoice>("off");
+  const [priorityMeta, setPriorityMeta] = useState<
+    Record<string, { vote_sum: number; vote_count: number; votes: LabelPriorityRow["votes"] }>
+  >({});
+  const [coverage, setCoverage] = useState<CoverageStatsResponse | null>(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
 
   const PAGE_SIZE_OPTIONS = [25, 50, 100, 200, 500] as const;
 
   useEffect(() => {
     setPageIndex(0);
-  }, [q, buckets, metaKey, metaValue, pageSize, projectId]);
+  }, [q, buckets, metaKey, metaValue, pageSize, projectId, priorityMode, goldTagId]);
+
+  // When the user clears the tag selector (or the project changes), drop any
+  // tag-scoped state so we don't render stale votes/coverage.
+  useEffect(() => {
+    if (!goldTagId) {
+      setPriorityMode("off");
+      setPriorityMeta({});
+      setCoverage(null);
+    }
+  }, [goldTagId, projectId]);
 
   const queryString = useMemo(() => {
     const sp = new URLSearchParams();
@@ -65,37 +87,127 @@ export default function ExplorePage() {
     return sp.toString();
   }, [q, buckets, metaKey, metaValue, pageSize, pageIndex]);
 
+  const inPriorityMode = priorityMode !== "off" && !!goldTagId;
+
   const refresh = useCallback(async () => {
     if (!projectId) {
       setRows([]);
       setTotal(0);
+      setPriorityMeta({});
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const res = await mlFetch(`/api/ml/v1/documents?${queryString}`);
-      if (!res.ok) {
-        setError("Failed to load documents");
-        setRows([]);
-        setTotal(0);
+      if (inPriorityMode) {
+        const sp = new URLSearchParams();
+        sp.set("tag_id", goldTagId);
+        sp.set("mode", priorityMode);
+        if (q.trim()) sp.set("q", q.trim());
+        for (const b of buckets) sp.append("length_bucket", b);
+        if (metaKey && metaValue) {
+          sp.set("metadata_key", metaKey);
+          sp.set("metadata_value", metaValue);
+        }
+        sp.set("limit", String(pageSize));
+        sp.set("offset", String(pageIndex * pageSize));
+        const res = await mlFetch(`/api/ml/v1/documents/label-priority?${sp.toString()}`);
+        if (!res.ok) {
+          setError("Failed to load Smart-pick documents");
+          setRows([]);
+          setTotal(0);
+          setPriorityMeta({});
+        } else {
+          const data = (await res.json()) as LabelPriorityResponse;
+          // LabelPriorityRow is a structural superset of Document for the
+          // fields we render, so we can hoist it directly into `rows`.
+          setRows(
+            data.items.map((r) => ({
+              id: r.id,
+              text: r.text,
+              metadata: r.metadata,
+              char_length: r.char_length,
+              created_at: r.created_at,
+            })),
+          );
+          setTotal(data.total);
+          const meta: Record<
+            string,
+            { vote_sum: number; vote_count: number; votes: LabelPriorityRow["votes"] }
+          > = {};
+          for (const r of data.items) {
+            meta[r.id] = { vote_sum: r.vote_sum, vote_count: r.vote_count, votes: r.votes };
+          }
+          setPriorityMeta(meta);
+          if (data.message) setError(data.message);
+        }
       } else {
-        const data = (await res.json()) as { items: Document[]; total: number };
-        setRows(data.items);
-        setTotal(data.total);
+        const res = await mlFetch(`/api/ml/v1/documents?${queryString}`);
+        if (!res.ok) {
+          setError("Failed to load documents");
+          setRows([]);
+          setTotal(0);
+        } else {
+          const data = (await res.json()) as { items: Document[]; total: number };
+          setRows(data.items);
+          setTotal(data.total);
+          setPriorityMeta({});
+        }
       }
     } catch (e) {
       setRows([]);
       setTotal(0);
+      setPriorityMeta({});
       setError(describeMlFetchError(e));
     } finally {
       setLoading(false);
     }
-  }, [queryString, projectId]);
+  }, [
+    queryString,
+    projectId,
+    inPriorityMode,
+    goldTagId,
+    priorityMode,
+    q,
+    buckets,
+    metaKey,
+    metaValue,
+    pageSize,
+    pageIndex,
+  ]);
 
   useEffect(() => {
     void refresh();
   }, [refresh, projectId]);
+
+  // Coverage banner: refresh whenever the user picks a different tag, after a
+  // labeling session (we re-pull when rows change so the banner stays honest
+  // about how many sample docs already have gold).
+  const refreshCoverage = useCallback(async () => {
+    if (!projectId || !goldTagId) {
+      setCoverage(null);
+      return;
+    }
+    setCoverageLoading(true);
+    try {
+      const res = await mlFetch(
+        `/api/ml/v1/documents/coverage-stats?tag_id=${encodeURIComponent(goldTagId)}&sample_size=200`,
+      );
+      if (!res.ok) {
+        setCoverage(null);
+      } else {
+        setCoverage((await res.json()) as CoverageStatsResponse);
+      }
+    } catch {
+      setCoverage(null);
+    } finally {
+      setCoverageLoading(false);
+    }
+  }, [projectId, goldTagId]);
+
+  useEffect(() => {
+    void refreshCoverage();
+  }, [refreshCoverage]);
 
   useEffect(() => {
     if (!projectId) {
@@ -212,6 +324,12 @@ export default function ExplorePage() {
         return next;
       });
       setGoldMsg("Could not save gold label.");
+    } else if (inPriorityMode) {
+      // The doc just left the unlabeled pool; pull a fresh page so the next
+      // priority candidate slides into view. Coverage can stay (sample_with_gold
+      // is the only thing that changes and the banner refresh below covers it).
+      void refresh();
+      void refreshCoverage();
     }
   };
 
@@ -538,6 +656,53 @@ export default function ExplorePage() {
             <p className="mt-2 text-xs text-ink-500">No tags yet. Open LF Studio and create a tag first.</p>
           ) : null}
           {goldMsg ? <div className="mt-2 text-xs text-amber-400">{goldMsg}</div> : null}
+
+          {goldTagId ? (
+            <>
+              <CoverageBanner stats={coverage} loading={coverageLoading} />
+              <div className="mt-3 rounded-md border border-ink-800 bg-ink-950/60 p-3">
+                <div className="text-xs font-medium text-ink-300">Smart pick</div>
+                <p className="mt-1 text-xs text-ink-500">
+                  Re-orders unlabeled documents for active learning. Uses the latest completed LF run for this tag.
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                  {(
+                    [
+                      { id: "off", label: "Off (newest first)" },
+                      { id: "uncertain", label: "Most uncertain" },
+                      { id: "no_lf_fires", label: "No LFs fire" },
+                      { id: "weak_positive", label: "Weak positives" },
+                    ] as const
+                  ).map((opt) => {
+                    const active = priorityMode === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setPriorityMode(opt.id)}
+                        className={`rounded-full px-3 py-1 transition-colors ${
+                          active
+                            ? "bg-accent-600 text-white"
+                            : "border border-ink-700 bg-ink-950 text-ink-200 hover:border-accent-500"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {inPriorityMode ? (
+                  <p className="mt-2 text-[11px] text-ink-500">
+                    {priorityMode === "uncertain"
+                      ? "Sorted by smallest |vote_sum| first — closest splits surface first."
+                      : priorityMode === "no_lf_fires"
+                        ? "Showing docs no LF voted on — these are the coverage holes."
+                        : "Showing docs predicted positive on a single LF vote — most likely false positives."}
+                  </p>
+                ) : null}
+              </div>
+            </>
+          ) : null}
         </div>
       </section>
 
@@ -560,6 +725,7 @@ export default function ExplorePage() {
             <tr>
               <th className="px-3 py-2">ID</th>
               <th className="px-3 py-2">Len</th>
+              {inPriorityMode ? <th className="px-3 py-2 whitespace-nowrap">Votes</th> : null}
               <th className="px-3 py-2">Metadata</th>
               <th className="w-full px-3 py-2">Text</th>
               {goldTagId ? (
@@ -576,6 +742,11 @@ export default function ExplorePage() {
               <tr key={d.id} className="align-top">
                 <td className="px-3 py-2 font-mono text-xs text-ink-500">{d.id.slice(0, 8)}…</td>
                 <td className="px-3 py-2 text-xs text-ink-200">{d.char_length}</td>
+                {inPriorityMode ? (
+                  <td className="px-3 py-2 text-xs text-ink-200">
+                    <PriorityVotesCell info={priorityMeta[d.id]} />
+                  </td>
+                ) : null}
                 <td className="px-3 py-2 text-xs text-ink-500">
                   <pre className="max-w-xs whitespace-pre-wrap break-words">
                     {JSON.stringify(d.metadata, null, 0)}
@@ -629,8 +800,13 @@ export default function ExplorePage() {
             })}
             {!rows.length ? (
               <tr>
-                <td className="px-3 py-6 text-sm text-ink-500" colSpan={goldTagId ? 5 : 4}>
-                  No documents yet. Upload a CSV/JSON file to begin.
+                <td
+                  className="px-3 py-6 text-sm text-ink-500"
+                  colSpan={4 + (goldTagId ? 1 : 0) + (inPriorityMode ? 1 : 0)}
+                >
+                  {inPriorityMode
+                    ? "Nothing matches this Smart-pick mode. Try a different mode or clear filters."
+                    : "No documents yet. Upload a CSV/JSON file to begin."}
                 </td>
               </tr>
             ) : null}
@@ -666,6 +842,104 @@ export default function ExplorePage() {
           </div>
         ) : null}
       </section>
+    </div>
+  );
+}
+
+function CoverageBanner({
+  stats,
+  loading,
+}: {
+  stats: CoverageStatsResponse | null;
+  loading: boolean;
+}) {
+  if (loading && !stats) {
+    return (
+      <div className="mt-3 rounded-md border border-ink-800 bg-ink-950/60 p-3 text-xs text-ink-500">
+        Loading coverage…
+      </div>
+    );
+  }
+  if (!stats) return null;
+  if (stats.message) {
+    return (
+      <div className="mt-3 rounded-md border border-amber-900/60 bg-amber-950/30 p-3 text-xs text-amber-200">
+        {stats.message}
+      </div>
+    );
+  }
+  const ceiling = stats.estimated_recall_ceiling;
+  const pct = ceiling != null ? Math.round(ceiling * 100) : null;
+  const noFire = stats.sample_no_lf_fires;
+  const tone =
+    pct == null
+      ? "border-ink-800 bg-ink-950/60 text-ink-300"
+      : pct >= 80
+        ? "border-emerald-900/60 bg-emerald-950/30 text-emerald-200"
+        : pct >= 50
+          ? "border-amber-900/60 bg-amber-950/30 text-amber-200"
+          : "border-red-900/60 bg-red-950/30 text-red-200";
+  return (
+    <div className={`mt-3 rounded-md border p-3 text-xs ${tone}`}>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="font-semibold">
+          Estimated recall ceiling: {pct != null ? `${pct}%` : "—"}
+        </span>
+        <span className="text-ink-400">
+          ({noFire} of {stats.sample_size} sampled docs match no LF · {stats.sample_with_gold}{" "}
+          already gold-labeled)
+        </span>
+      </div>
+      {pct != null && pct < 80 ? (
+        <p className="mt-1 text-[11px] text-ink-400">
+          Use <span className="text-ink-200">Smart pick → No LFs fire</span> below to label coverage
+          holes and raise the ceiling.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function PriorityVotesCell({
+  info,
+}: {
+  info?: { vote_sum: number; vote_count: number; votes: LabelPriorityRow["votes"] };
+}) {
+  if (!info) return <span className="text-ink-500">—</span>;
+  const sumLabel = info.vote_sum > 0 ? `+${info.vote_sum}` : `${info.vote_sum}`;
+  const sumTone =
+    info.vote_sum > 0
+      ? "text-emerald-300"
+      : info.vote_sum < 0
+        ? "text-red-300"
+        : "text-ink-300";
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline gap-2">
+        <span className={`font-mono text-[11px] font-semibold ${sumTone}`}>{sumLabel}</span>
+        <span className="text-[10px] text-ink-500">
+          {info.vote_count} {info.vote_count === 1 ? "LF" : "LFs"}
+        </span>
+      </div>
+      {info.votes.length ? (
+        <div className="flex max-w-[200px] flex-wrap gap-1">
+          {info.votes.map((v, i) => (
+            <span
+              key={`${v.labeling_function_id}-${i}`}
+              title={`${v.labeling_function_name} voted ${v.vote === 1 ? "+1" : v.vote === -1 ? "−1" : "0"}`}
+              className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                v.vote > 0
+                  ? "bg-emerald-900/40 text-emerald-200"
+                  : v.vote < 0
+                    ? "bg-red-900/40 text-red-200"
+                    : "bg-ink-900/60 text-ink-300"
+              }`}
+            >
+              {v.labeling_function_name}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

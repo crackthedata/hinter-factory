@@ -249,6 +249,111 @@ paths:
               schema:
                 type: array
                 items: { type: string }
+  /v1/documents/label-priority:
+    get:
+      tags: [documents]
+      operationId: listLabelPriority
+      summary: List unlabeled documents ranked for active learning
+      description: >-
+        Returns unlabeled documents (no gold label for the given tag) ordered
+        by an active-learning priority. Modes:
+          - `uncertain`: smallest |vote_sum| first, ties broken by higher
+            vote_count (closest splits surface first).
+          - `no_lf_fires`: documents the latest run produced zero votes for —
+            coverage holes that need labels to measure recall.
+          - `weak_positive`: predicted positive on a single LF vote — the most
+            likely false positives.
+        Uses the latest *completed* LF run for the tag unless `run_id` is
+        provided. Same `q`, `length_bucket`, `metadata_*` filters as
+        `listDocuments`.
+      parameters:
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: mode
+          required: false
+          schema:
+            $ref: "#/components/schemas/LabelPriorityMode"
+        - in: query
+          name: run_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: length_bucket
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/LengthBucket"
+        - in: query
+          name: metadata_key
+          schema: { type: string }
+        - in: query
+          name: metadata_value
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabelPriorityResponse"
+        "400":
+          description: bad mode or filter
+        "404":
+          description: tag not found
+  /v1/documents/coverage-stats:
+    get:
+      tags: [documents]
+      operationId: getCoverageStats
+      summary: Estimate recall ceiling from LF coverage on a sample
+      description: >-
+        Samples the project's documents (deterministically, ORDER BY id LIMIT N)
+        and reports what fraction of them produced no LF votes in the latest
+        completed run. `estimated_recall_ceiling = 1 - no_lf_fires_rate` is the
+        upper bound on true-positive recall achievable with the current LFs.
+      parameters:
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: run_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: sample_size
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 2000, default: 200 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoverageStatsResponse"
+        "404":
+          description: tag not found
   /v1/tags:
     get:
       tags: [tags]
@@ -379,6 +484,56 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LabelingFunctionPreviewResponse"
+  /v1/labeling-functions/suggestions:
+    get:
+      tags: [labelingFunctions]
+      operationId: suggestLabelingFunctions
+      description: >-
+        Suggest candidate keyword labeling functions for a tag, mined from
+        gold-labeled documents (when present), the corpus, and the tag name.
+        Tokens already covered by an existing keywords or regex LF for the
+        tag are filtered out so the panel only proposes new coverage.
+      parameters:
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+          description: >-
+            Project the tag belongs to. Required at runtime; marked optional
+            so the web client's openapi-fetch middleware can inject it.
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        - in: query
+          name: exclude
+          required: false
+          description: >-
+            Tokens to treat as already-covered (in addition to existing LFs).
+            Repeat the parameter for multiple values, e.g.
+            `?exclude=foo&exclude=bar`. Used by the UI to thread dismissed
+            suggestions back so a refresh surfaces fresh candidates instead of
+            the same ones.
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HinterSuggestionsResponse"
+        "400":
+          description: project_id or tag_id missing
+        "404":
+          description: tag not found in project
   /v1/lf-runs:
     get:
       tags: [lfRuns]
@@ -804,6 +959,132 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/LabelingFunctionPreviewRow"
+    HinterSuggestion:
+      type: object
+      required: [keyword, score, positive_hits, negative_hits, example_document_ids]
+      properties:
+        keyword:
+          type: string
+          description: Lowercase token proposed as a single-keyword labeling function.
+        score:
+          type: number
+          format: float
+          description: Heuristic ranking score; higher is more confident.
+        positive_hits:
+          type: integer
+          description: Distinct gold-positive documents containing the token.
+        negative_hits:
+          type: integer
+          description: Distinct gold-negative documents containing the token.
+        example_document_ids:
+          type: array
+          items: { type: string }
+          description: Up to a few document ids that contain the token.
+    HinterSuggestionsBasis:
+      type: string
+      enum: [gold, tag_name, mixed]
+      description: >-
+        Which signal drove the ranking. `gold` = gold labels only, `tag_name`
+        = cold-start (no gold labels), `mixed` = gold labels plus tag-name
+        boost.
+    HinterSuggestionsResponse:
+      type: object
+      required: [tag_id, generated_at, basis, suggestions]
+      properties:
+        tag_id: { type: string }
+        generated_at: { type: string, format: date-time }
+        basis: { $ref: "#/components/schemas/HinterSuggestionsBasis" }
+        suggestions:
+          type: array
+          items:
+            $ref: "#/components/schemas/HinterSuggestion"
+    LabelPriorityMode:
+      type: string
+      enum: [uncertain, no_lf_fires, weak_positive]
+      description: >-
+        Active-learning ordering. `uncertain` ranks by smallest |vote_sum|
+        first (closest splits surface first). `no_lf_fires` lists docs the
+        latest run produced zero votes for. `weak_positive` lists docs
+        predicted positive on a single LF vote.
+    LabelPriorityVote:
+      type: object
+      required: [labeling_function_id, labeling_function_name, vote]
+      properties:
+        labeling_function_id: { type: string }
+        labeling_function_name: { type: string }
+        vote: { $ref: "#/components/schemas/LfVote" }
+    LabelPriorityRow:
+      type: object
+      required:
+        [id, text, metadata, char_length, created_at, vote_sum, vote_count, votes]
+      properties:
+        id: { type: string }
+        text: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+        char_length: { type: integer }
+        created_at: { type: string, format: date-time }
+        vote_sum:
+          type: integer
+          description: Sum of LF votes (-1/0/+1) cast on this doc in the run.
+        vote_count:
+          type: integer
+          description: Number of LFs that voted (non-zero) on this doc.
+        votes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LabelPriorityVote"
+    LabelPriorityResponse:
+      type: object
+      required: [run_id, mode, total, items]
+      properties:
+        run_id:
+          type: string
+          nullable: true
+          description: LF run the priority was computed against. Null when no run exists.
+        mode: { $ref: "#/components/schemas/LabelPriorityMode" }
+        total:
+          type: integer
+          description: Total docs matching the mode + filters before pagination.
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LabelPriorityRow"
+        message:
+          type: string
+          nullable: true
+          description: Human-readable hint when the result is empty (e.g. no run yet).
+    CoverageStatsResponse:
+      type: object
+      required:
+        [tag_id, sample_size, sample_no_lf_fires, sample_with_gold]
+      properties:
+        tag_id: { type: string }
+        run_id:
+          type: string
+          nullable: true
+        sample_size:
+          type: integer
+          description: Actual number of documents in the sample (<= requested).
+        sample_no_lf_fires:
+          type: integer
+          description: Documents in the sample that produced zero LF votes.
+        no_lf_fires_rate:
+          type: number
+          format: float
+          nullable: true
+        estimated_recall_ceiling:
+          type: number
+          format: float
+          nullable: true
+          description: 1 - no_lf_fires_rate. Upper bound on recall achievable by current LFs.
+        sample_with_gold:
+          type: integer
+          description: How many of the sampled docs already have a gold label for this tag.
+        message:
+          type: string
+          nullable: true
     LfVote:
       type: integer
       enum: [-1, 0, 1]

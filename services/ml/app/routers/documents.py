@@ -18,7 +18,12 @@ from starlette.datastructures import UploadFile
 
 from app.database import get_db
 from app.ingest import IngestError, iter_csv_batches, parse_csv_bytes, parse_json_bytes
-from app.models import Document
+from app.labeling_priority import (
+    PRIORITY_MODES,
+    coverage_stats,
+    list_label_priority,
+)
+from app.models import Document, Tag
 from app.project_scope import resolve_project_id
 
 # See docs/notes-ml.md#servicesmlapproutersdocumentspy for tuning constants and Starlette upload-cap rationale.
@@ -378,6 +383,107 @@ def list_documents(
             }
             for d in rows
         ],
+    }
+
+
+@router.get("/label-priority")
+def get_label_priority(
+    db: Annotated[Session, Depends(get_db)],
+    tag_id: str,
+    mode: str = "uncertain",
+    project_id: str | None = None,
+    run_id: str | None = None,
+    q: str | None = None,
+    length_bucket: list[str] | None = Query(None),
+    metadata_key: str | None = None,
+    metadata_value: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    project_id = resolve_project_id(db, project_id)
+    if mode not in PRIORITY_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown mode: {mode}. Valid: {sorted(PRIORITY_MODES)}",
+        )
+    tag = db.get(Tag, tag_id)
+    if not tag or tag.project_id != project_id:
+        raise HTTPException(status_code=404, detail="tag not found")
+    if metadata_key:
+        _validate_metadata_key(metadata_key)
+        if metadata_value is None:
+            raise HTTPException(
+                status_code=400, detail="metadata_value is required when metadata_key is set"
+            )
+    result = list_label_priority(
+        db,
+        project_id=project_id,
+        tag_id=tag_id,
+        mode=mode,  # type: ignore[arg-type]
+        run_id=run_id,
+        q=q,
+        length_bucket=length_bucket,
+        metadata_key=metadata_key,
+        metadata_value=metadata_value,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "run_id": result.run_id,
+        "mode": result.mode,
+        "total": result.total,
+        "items": [
+            {
+                "id": r.id,
+                "text": r.text,
+                "metadata": r.metadata,
+                "char_length": r.char_length,
+                "created_at": r.created_at,
+                "vote_sum": r.vote_sum,
+                "vote_count": r.vote_count,
+                "votes": [
+                    {
+                        "labeling_function_id": v.labeling_function_id,
+                        "labeling_function_name": v.labeling_function_name,
+                        "vote": v.vote,
+                    }
+                    for v in r.votes
+                ],
+            }
+            for r in result.items
+        ],
+        "message": result.message,
+    }
+
+
+@router.get("/coverage-stats")
+def get_coverage_stats(
+    db: Annotated[Session, Depends(get_db)],
+    tag_id: str,
+    project_id: str | None = None,
+    run_id: str | None = None,
+    sample_size: int = 200,
+):
+    project_id = resolve_project_id(db, project_id)
+    tag = db.get(Tag, tag_id)
+    if not tag or tag.project_id != project_id:
+        raise HTTPException(status_code=404, detail="tag not found")
+    result = coverage_stats(
+        db,
+        project_id=project_id,
+        tag_id=tag_id,
+        run_id=run_id,
+        sample_size=sample_size,
+    )
+    return {
+        "tag_id": result.tag_id,
+        "run_id": result.run_id,
+        "sample_size": result.sample_size,
+        "sample_no_lf_fires": result.sample_no_lf_fires,
+        "no_lf_fires_rate": result.no_lf_fires_rate,
+        "estimated_recall_ceiling": result.estimated_recall_ceiling,
+        "sample_with_gold": result.sample_with_gold,
+        "message": result.message,
     }
 
 
