@@ -155,6 +155,8 @@ def test_export_then_import_roundtrips_full_workspace() -> None:
     assert len(bundle["gold_labels"]) == 2
     assert len(bundle["lf_runs"]) == 1
     assert len(bundle["lf_runs"][0]["votes"]) == 2
+    # The LF run wrote one ProbabilisticLabel row per (doc, tag).
+    assert len(bundle["probabilistic_labels"]) == 2
 
     res = client.post("/v1/projects/import", json=bundle)
     assert res.status_code == 201, res.text
@@ -165,7 +167,7 @@ def test_export_then_import_roundtrips_full_workspace() -> None:
         "labeling_functions": 1,
         "gold_labels": 2,
         "lf_runs": 1,
-        "probabilistic_labels": 0,
+        "probabilistic_labels": 2,
     }
     assert imported["name"].startswith(bundle["project"]["name"])
     new_id = imported["id"]
