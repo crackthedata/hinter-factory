@@ -604,10 +604,33 @@ paths:
     get:
       tags: [probabilisticLabels]
       operationId: listProbabilisticLabels
+      summary: List per-document tag probabilities, sortable across the whole corpus
+      description: >-
+        Returns the probability that each document carries the tag, computed
+        from the latest completed LF run by a Laplace-smoothed majority vote.
+        Each row is enriched with the source document's text preview and the
+        positive/negative vote tallies so the UI can render the rationale next
+        to the score. Sort defaults to highest probability first.
       parameters:
         - in: query
           name: tag_id
           schema: { type: string }
+        - in: query
+          name: predicted
+          description: Filter to a predicted bucket (probability > 0.5, < 0.5, or == 0.5)
+          schema:
+            type: string
+            enum: [positive, negative, abstain]
+        - in: query
+          name: q
+          description: Optional substring filter on document text
+          schema: { type: string }
+        - in: query
+          name: sort
+          schema:
+            type: string
+            enum: [probability_desc, probability_asc, entropy_desc, updated_at]
+            default: probability_desc
         - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
@@ -620,9 +643,7 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/ProbabilisticLabel"
+                $ref: "#/components/schemas/ProbabilisticLabelListResponse"
     post:
       tags: [probabilisticLabels]
       operationId: upsertProbabilisticLabel
@@ -639,6 +660,26 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProbabilisticLabel"
+  /v1/probabilistic-labels/distribution:
+    get:
+      tags: [probabilisticLabels]
+      operationId: probabilityDistribution
+      summary: Histogram of corpus-wide probabilities for one tag
+      parameters:
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: bins
+          schema: { type: integer, minimum: 2, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProbabilityDistributionResponse"
   /v1/evaluation:
     get:
       tags: [evaluation]
@@ -1150,6 +1191,67 @@ components:
         conflict_score: { type: number, nullable: true }
         entropy: { type: number, nullable: true }
         updated_at: { type: string, format: date-time }
+    ProbabilisticLabelRow:
+      allOf:
+        - $ref: "#/components/schemas/ProbabilisticLabel"
+        - type: object
+          required: [predicted, positive_votes, negative_votes, text_preview, char_length]
+          properties:
+            predicted:
+              $ref: "#/components/schemas/LfVote"
+            positive_votes:
+              type: integer
+              description: How many LFs voted +1 for this (doc, tag) in the latest completed run.
+            negative_votes:
+              type: integer
+              description: How many LFs voted -1 for this (doc, tag) in the latest completed run.
+            text_preview:
+              type: string
+              description: Truncated body of the source document for compact rendering.
+            char_length:
+              type: integer
+    ProbabilisticLabelListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProbabilisticLabelRow"
+        total: { type: integer }
+        run_id:
+          type: string
+          nullable: true
+          description: Latest completed LF run for the requested tag, if any.
+    ProbabilityDistributionBin:
+      type: object
+      required: [lower, upper, count]
+      properties:
+        lower: { type: number }
+        upper: { type: number }
+        count: { type: integer }
+    ProbabilityDistributionResponse:
+      type: object
+      required:
+        - tag_id
+        - total
+        - predicted_positive
+        - predicted_negative
+        - predicted_abstain
+        - bins
+      properties:
+        tag_id: { type: string }
+        total: { type: integer }
+        predicted_positive: { type: integer }
+        predicted_negative: { type: integer }
+        predicted_abstain: { type: integer }
+        mean_probability:
+          type: number
+          nullable: true
+        bins:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProbabilityDistributionBin"
     ProbabilisticLabelUpsert:
       type: object
       required: [document_id, tag_id, probability]

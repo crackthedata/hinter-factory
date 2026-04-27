@@ -337,9 +337,30 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * List per-document tag probabilities, sortable across the whole corpus
+         * @description Returns the probability that each document carries the tag, computed from the latest completed LF run by a Laplace-smoothed majority vote. Each row is enriched with the source document's text preview and the positive/negative vote tallies so the UI can render the rationale next to the score. Sort defaults to highest probability first.
+         */
         get: operations["listProbabilisticLabels"];
         put?: never;
         post: operations["upsertProbabilisticLabel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/probabilistic-labels/distribution": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Histogram of corpus-wide probabilities for one tag */
+        get: operations["probabilityDistribution"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -689,6 +710,36 @@ export interface components {
             entropy?: number | null;
             /** Format: date-time */
             updated_at?: string;
+        };
+        ProbabilisticLabelRow: components["schemas"]["ProbabilisticLabel"] & {
+            predicted: components["schemas"]["LfVote"];
+            /** @description How many LFs voted +1 for this (doc, tag) in the latest completed run. */
+            positive_votes: number;
+            /** @description How many LFs voted -1 for this (doc, tag) in the latest completed run. */
+            negative_votes: number;
+            /** @description Truncated body of the source document for compact rendering. */
+            text_preview: string;
+            char_length: number;
+        };
+        ProbabilisticLabelListResponse: {
+            items: components["schemas"]["ProbabilisticLabelRow"][];
+            total: number;
+            /** @description Latest completed LF run for the requested tag, if any. */
+            run_id?: string | null;
+        };
+        ProbabilityDistributionBin: {
+            lower: number;
+            upper: number;
+            count: number;
+        };
+        ProbabilityDistributionResponse: {
+            tag_id: string;
+            total: number;
+            predicted_positive: number;
+            predicted_negative: number;
+            predicted_abstain: number;
+            mean_probability?: number | null;
+            bins: components["schemas"]["ProbabilityDistributionBin"][];
         };
         ProbabilisticLabelUpsert: {
             document_id: string;
@@ -1495,6 +1546,11 @@ export interface operations {
         parameters: {
             query?: {
                 tag_id?: string;
+                /** @description Filter to a predicted bucket (probability > 0.5, < 0.5, or == 0.5) */
+                predicted?: "positive" | "negative" | "abstain";
+                /** @description Optional substring filter on document text */
+                q?: string;
+                sort?: "probability_desc" | "probability_asc" | "entropy_desc" | "updated_at";
                 limit?: number;
                 offset?: number;
             };
@@ -1510,7 +1566,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProbabilisticLabel"][];
+                    "application/json": components["schemas"]["ProbabilisticLabelListResponse"];
                 };
             };
         };
@@ -1535,6 +1591,29 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProbabilisticLabel"];
+                };
+            };
+        };
+    };
+    probabilityDistribution: {
+        parameters: {
+            query: {
+                tag_id: string;
+                bins?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProbabilityDistributionResponse"];
                 };
             };
         };

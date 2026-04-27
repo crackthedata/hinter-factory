@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.lf_executor import LfConfigError, execute_labeling_function
 from app.models import Document, LabelingFunction, LfRun, LfRunLabelingFunction, LfRunVote, Tag
+from app.probabilistic_aggregator import write_probabilistic_labels_for_run
 from app.project_scope import resolve_project_id
 
 router = APIRouter(prefix="/v1/lf-runs", tags=["lfRuns"])
@@ -95,6 +96,14 @@ def create_lf_run(payload: dict, db: Annotated[Session, Depends(get_db)]):
     run.documents_scanned = scanned
     run.votes_written = len(votes)
     run.completed_at = datetime.utcnow()
+    # Flush so the aggregator can read the votes back via the session.
+    db.flush()
+    write_probabilistic_labels_for_run(
+        db,
+        project_id=run.project_id,
+        tag_id=run.tag_id,
+        run_id=run.id,
+    )
     db.commit()
     db.refresh(run)
     return _serialize_run(run, [lf.id for lf in lf_rows])
