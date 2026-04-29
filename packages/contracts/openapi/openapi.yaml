@@ -1,0 +1,1398 @@
+openapi: 3.1.0
+info:
+  title: Hinter Factory ML API
+  version: 0.1.0
+  description: >-
+    Every scoped endpoint (documents, tags, labeling functions, LF runs,
+    gold labels, probabilistic labels, evaluation) requires a `project_id`
+    query parameter (or, for multipart uploads, a `project_id` form field).
+    There is no implicit fallback project; calls that omit it return 400.
+    Use `GET /v1/projects` to discover available projects and
+    `POST /v1/projects` to create one. The web UI threads `project_id`
+    through every request automatically via its project context.
+servers:
+  - url: http://localhost:8000
+tags:
+  - name: projects
+  - name: documents
+  - name: tags
+  - name: labelingFunctions
+  - name: lfRuns
+  - name: probabilisticLabels
+  - name: goldLabels
+  - name: evaluation
+paths:
+  /v1/projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      summary: List all projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Project"
+    post:
+      tags: [projects]
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "409":
+          description: Name conflict
+  /v1/projects/{project_id}:
+    get:
+      tags: [projects]
+      operationId: getProject
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectWithCounts"
+        "404":
+          description: Not found
+    delete:
+      tags: [projects]
+      operationId: deleteProject
+      description: Deletes the project and all of its scoped data. The Default project cannot be deleted.
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Deleted
+        "400":
+          description: Cannot delete Default
+        "404":
+          description: Not found
+  /v1/projects/{project_id}/export:
+    get:
+      tags: [projects]
+      operationId: exportProject
+      summary: Export the full project workspace as a portable JSON bundle
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: include_runs
+          schema: { type: boolean, default: true }
+          description: Include the latest completed LF run per tag (with all votes).
+      responses:
+        "200":
+          description: Project bundle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectExport"
+        "404":
+          description: Not found
+  /v1/projects/import:
+    post:
+      tags: [projects]
+      operationId: importProject
+      summary: Import a project bundle. UUIDs are re-minted; relationships are preserved.
+      parameters:
+        - in: query
+          name: target_name
+          schema: { type: string }
+          description: Override the bundled project name. Suffixes on collision either way.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectExport"
+      responses:
+        "201":
+          description: Imported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectWithCounts"
+        "400":
+          description: Bundle invalid
+  /v1/documents/upload:
+    post:
+      tags: [documents]
+      operationId: uploadDocuments
+      summary: Ingest documents from CSV or JSON
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                text_column:
+                  type: string
+                  default: text
+                  description: CSV column name for document body
+                id_column:
+                  type: string
+                  description: Optional CSV column to use as stable id
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentIngestResult"
+  /v1/documents:
+    get:
+      tags: [documents]
+      operationId: listDocuments
+      summary: Explore corpus with search and facets
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: length_bucket
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/LengthBucket"
+        - in: query
+          name: metadata_key
+          schema: { type: string }
+        - in: query
+          name: metadata_value
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentListResponse"
+  /v1/documents/{document_id}:
+    get:
+      tags: [documents]
+      operationId: getDocument
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "404":
+          description: Not found
+  /v1/documents/facets/metadata-keys:
+    get:
+      tags: [documents]
+      operationId: listMetadataFacetKeys
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+  /v1/documents/facets/metadata-values:
+    get:
+      tags: [documents]
+      operationId: listMetadataFacetValues
+      parameters:
+        - in: query
+          name: key
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+  /v1/documents/label-priority:
+    get:
+      tags: [documents]
+      operationId: listLabelPriority
+      summary: List unlabeled documents ranked for active learning
+      description: >-
+        Returns unlabeled documents (no gold label for the given tag) ordered
+        by an active-learning priority. Modes:
+          - `uncertain`: smallest |vote_sum| first, ties broken by higher
+            vote_count (closest splits surface first).
+          - `no_lf_fires`: documents the latest run produced zero votes for —
+            coverage holes that need labels to measure recall.
+          - `weak_positive`: predicted positive on a single LF vote — the most
+            likely false positives.
+        Uses the latest *completed* LF run for the tag unless `run_id` is
+        provided. Same `q`, `length_bucket`, `metadata_*` filters as
+        `listDocuments`.
+      parameters:
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: mode
+          required: false
+          schema:
+            $ref: "#/components/schemas/LabelPriorityMode"
+        - in: query
+          name: run_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: length_bucket
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/LengthBucket"
+        - in: query
+          name: metadata_key
+          schema: { type: string }
+        - in: query
+          name: metadata_value
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabelPriorityResponse"
+        "400":
+          description: bad mode or filter
+        "404":
+          description: tag not found
+  /v1/documents/coverage-stats:
+    get:
+      tags: [documents]
+      operationId: getCoverageStats
+      summary: Estimate recall ceiling from LF coverage on a sample
+      description: >-
+        Samples the project's documents (deterministically, ORDER BY id LIMIT N)
+        and reports what fraction of them produced no LF votes in the latest
+        completed run. `estimated_recall_ceiling = 1 - no_lf_fires_rate` is the
+        upper bound on true-positive recall achievable with the current LFs.
+      parameters:
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: run_id
+          required: false
+          schema: { type: string }
+        - in: query
+          name: sample_size
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 2000, default: 200 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoverageStatsResponse"
+        "404":
+          description: tag not found
+  /v1/tags:
+    get:
+      tags: [tags]
+      operationId: listTags
+      parameters:
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+          description: >-
+            Project to scope the listing to. Required at the runtime / API level
+            (the server returns 400 when it's missing); marked optional in the
+            schema only so the web client's openapi-fetch middleware can inject
+            it transparently from the active project header.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tag"
+        "400":
+          description: project_id missing
+    post:
+      tags: [tags]
+      operationId: createTag
+      parameters:
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+          description: >-
+            Project to create the tag in. Required at the runtime / API level
+            (the server returns 400 when it's missing); marked optional in the
+            schema only so the web client's openapi-fetch middleware can inject
+            it from the active project header. Wins over a `project_id` field
+            in the request body if both are present.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TagCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+  /v1/labeling-functions:
+    get:
+      tags: [labelingFunctions]
+      operationId: listLabelingFunctions
+      parameters:
+        - in: query
+          name: tag_id
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LabelingFunction"
+    post:
+      tags: [labelingFunctions]
+      operationId: createLabelingFunction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LabelingFunctionCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabelingFunction"
+  /v1/labeling-functions/{labeling_function_id}:
+    patch:
+      tags: [labelingFunctions]
+      operationId: updateLabelingFunction
+      parameters:
+        - $ref: "#/components/parameters/LabelingFunctionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LabelingFunctionUpdate"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabelingFunction"
+    delete:
+      tags: [labelingFunctions]
+      operationId: deleteLabelingFunction
+      parameters:
+        - $ref: "#/components/parameters/LabelingFunctionId"
+      responses:
+        "204":
+          description: Deleted
+  /v1/labeling-functions/{labeling_function_id}/preview:
+    post:
+      tags: [labelingFunctions]
+      operationId: previewLabelingFunction
+      parameters:
+        - $ref: "#/components/parameters/LabelingFunctionId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LabelingFunctionPreviewRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LabelingFunctionPreviewResponse"
+  /v1/labeling-functions/suggestions:
+    get:
+      tags: [labelingFunctions]
+      operationId: suggestLabelingFunctions
+      description: >-
+        Suggest candidate keyword labeling functions for a tag, mined from
+        gold-labeled documents (when present), the corpus, and the tag name.
+        Tokens already covered by an existing keywords or regex LF for the
+        tag are filtered out so the panel only proposes new coverage.
+      parameters:
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: project_id
+          required: false
+          schema: { type: string }
+          description: >-
+            Project the tag belongs to. Required at runtime; marked optional
+            so the web client's openapi-fetch middleware can inject it.
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        - in: query
+          name: exclude
+          required: false
+          description: >-
+            Tokens to treat as already-covered (in addition to existing LFs).
+            Repeat the parameter for multiple values, e.g.
+            `?exclude=foo&exclude=bar`. Used by the UI to thread dismissed
+            suggestions back so a refresh surfaces fresh candidates instead of
+            the same ones.
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HinterSuggestionsResponse"
+        "400":
+          description: project_id or tag_id missing
+        "404":
+          description: tag not found in project
+  /v1/lf-runs:
+    get:
+      tags: [lfRuns]
+      operationId: listLfRuns
+      parameters:
+        - in: query
+          name: tag_id
+          schema: { type: string }
+        - in: query
+          name: status
+          schema:
+            $ref: "#/components/schemas/LfRunStatus"
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LfRun"
+    post:
+      tags: [lfRuns]
+      operationId: createLfRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LfRunCreate"
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LfRun"
+  /v1/lf-runs/{run_id}:
+    get:
+      tags: [lfRuns]
+      operationId: getLfRun
+      parameters:
+        - $ref: "#/components/parameters/LfRunId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LfRun"
+  /v1/lf-runs/{run_id}/matrix:
+    get:
+      tags: [lfRuns]
+      operationId: exportLfMatrix
+      parameters:
+        - $ref: "#/components/parameters/LfRunId"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SparseLabelMatrix"
+  /v1/probabilistic-labels:
+    get:
+      tags: [probabilisticLabels]
+      operationId: listProbabilisticLabels
+      summary: List per-document tag probabilities, sortable across the whole corpus
+      description: >-
+        Returns the probability that each document carries the tag, computed
+        from the latest completed LF run by a Laplace-smoothed majority vote.
+        Each row is enriched with the source document's text preview and the
+        positive/negative vote tallies so the UI can render the rationale next
+        to the score. Sort defaults to highest probability first.
+      parameters:
+        - in: query
+          name: tag_id
+          schema: { type: string }
+        - in: query
+          name: predicted
+          description: Filter to a predicted bucket (probability > 0.5, < 0.5, or == 0.5)
+          schema:
+            type: string
+            enum: [positive, negative, abstain]
+        - in: query
+          name: q
+          description: Optional substring filter on document text
+          schema: { type: string }
+        - in: query
+          name: sort
+          schema:
+            type: string
+            enum: [probability_desc, probability_asc, entropy_desc, updated_at]
+            default: probability_desc
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProbabilisticLabelListResponse"
+    post:
+      tags: [probabilisticLabels]
+      operationId: upsertProbabilisticLabel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProbabilisticLabelUpsert"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProbabilisticLabel"
+  /v1/probabilistic-labels/distribution:
+    get:
+      tags: [probabilisticLabels]
+      operationId: probabilityDistribution
+      summary: Histogram of corpus-wide probabilities for one tag
+      parameters:
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: bins
+          schema: { type: integer, minimum: 2, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProbabilityDistributionResponse"
+  /v1/evaluation:
+    get:
+      tags: [evaluation]
+      operationId: getEvaluation
+      summary: Confusion stats and FP/FN list for a tag's gold-labeled validation set
+      parameters:
+        - in: query
+          name: tag_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: run_id
+          description: LF run to evaluate; defaults to latest completed run for tag
+          schema: { type: string }
+        - in: query
+          name: text_preview_chars
+          schema: { type: integer, minimum: 20, maximum: 2000, default: 240 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 2000, default: 200 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluationResponse"
+        "404":
+          description: Tag or run not found
+        "409":
+          description: Specified run is not completed
+  /v1/gold-labels:
+    get:
+      tags: [goldLabels]
+      operationId: listGoldLabels
+      parameters:
+        - in: query
+          name: document_id
+          schema: { type: string }
+        - in: query
+          name: document_ids
+          description: Repeat query key for each id (e.g. document_ids=a&document_ids=b)
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+        - in: query
+          name: tag_id
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GoldLabel"
+    post:
+      tags: [goldLabels]
+      operationId: createGoldLabel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoldLabelCreate"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoldLabel"
+components:
+  parameters:
+    DocumentId:
+      name: document_id
+      in: path
+      required: true
+      schema: { type: string }
+    LabelingFunctionId:
+      name: labeling_function_id
+      in: path
+      required: true
+      schema: { type: string }
+    LfRunId:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: string }
+  schemas:
+    Project:
+      type: object
+      required: [id, name, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    ProjectCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string, nullable: true }
+    ProjectCounts:
+      type: object
+      properties:
+        documents: { type: integer }
+        tags: { type: integer }
+        labeling_functions: { type: integer }
+        gold_labels: { type: integer }
+        lf_runs: { type: integer }
+        probabilistic_labels: { type: integer }
+    ProjectWithCounts:
+      allOf:
+        - $ref: "#/components/schemas/Project"
+        - type: object
+          properties:
+            counts: { $ref: "#/components/schemas/ProjectCounts" }
+    ProjectExport:
+      type: object
+      required: [format, format_version, project, documents, tags, labeling_functions, gold_labels, lf_runs, probabilistic_labels]
+      properties:
+        format:
+          type: string
+          enum: ["hinter-factory.project"]
+        format_version: { type: integer }
+        exported_at: { type: string, format: date-time }
+        project:
+          type: object
+          properties:
+            name: { type: string }
+            description: { type: string, nullable: true }
+        documents:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              text: { type: string }
+              metadata: { type: object, additionalProperties: true }
+              char_length: { type: integer }
+              created_at: { type: string, format: date-time }
+        tags:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              taxonomy_version: { type: string }
+              created_at: { type: string, format: date-time }
+        labeling_functions:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              tag_id: { type: string }
+              name: { type: string }
+              type: { type: string }
+              config: { type: object, additionalProperties: true }
+              enabled: { type: boolean }
+              created_at: { type: string, format: date-time }
+        gold_labels:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              document_id: { type: string }
+              tag_id: { type: string }
+              value: { type: integer, enum: [-1, 0, 1] }
+              note: { type: string, nullable: true }
+              created_at: { type: string, format: date-time }
+        lf_runs:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              tag_id: { type: string }
+              status: { type: string }
+              documents_scanned: { type: integer }
+              votes_written: { type: integer }
+              created_at: { type: string, format: date-time }
+              completed_at: { type: string, format: date-time, nullable: true }
+              labeling_function_ids:
+                type: array
+                items: { type: string }
+              votes:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    document_id: { type: string }
+                    labeling_function_id: { type: string }
+                    vote: { type: integer, enum: [-1, 0, 1] }
+        probabilistic_labels:
+          type: array
+          items:
+            type: object
+            properties:
+              document_id: { type: string }
+              tag_id: { type: string }
+              probability: { type: number }
+              conflict_score: { type: number, nullable: true }
+              entropy: { type: number, nullable: true }
+              updated_at: { type: string, format: date-time }
+    LengthBucket:
+      type: string
+      enum: [short, medium, long]
+      description: short <100 chars, medium 100-499, long 500+
+    Document:
+      type: object
+      required: [id, text, metadata, char_length, created_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        text: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+        char_length: { type: integer }
+        created_at: { type: string, format: date-time }
+    DocumentListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Document"
+        total: { type: integer }
+    DocumentIngestResult:
+      type: object
+      required: [inserted, skipped, errors]
+      properties:
+        inserted: { type: integer }
+        skipped: { type: integer }
+        errors:
+          type: array
+          items: { type: string }
+    Tag:
+      type: object
+      required: [id, name, taxonomy_version, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        taxonomy_version: { type: string }
+        created_at: { type: string, format: date-time }
+    TagCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        taxonomy_version: { type: string, default: "v1" }
+    LabelingFunctionType:
+      type: string
+      enum: [regex, keywords, structural, zeroshot, llm_prompt]
+    LabelingFunction:
+      type: object
+      required: [id, tag_id, name, type, config, enabled, created_at]
+      properties:
+        id: { type: string }
+        tag_id: { type: string }
+        name: { type: string }
+        type:
+          $ref: "#/components/schemas/LabelingFunctionType"
+        config:
+          type: object
+          additionalProperties: true
+          description: Type-specific JSON (patterns, thresholds, etc.)
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+    LabelingFunctionCreate:
+      type: object
+      required: [tag_id, name, type, config]
+      properties:
+        tag_id: { type: string }
+        name: { type: string }
+        type:
+          $ref: "#/components/schemas/LabelingFunctionType"
+        config:
+          type: object
+          additionalProperties: true
+        enabled: { type: boolean, default: true }
+    LabelingFunctionUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        config:
+          type: object
+          additionalProperties: true
+        enabled: { type: boolean }
+    LabelingFunctionPreviewRequest:
+      type: object
+      properties:
+        limit: { type: integer, minimum: 1, maximum: 200, default: 25 }
+        document_ids:
+          type: array
+          items: { type: string }
+    LabelingFunctionPreviewRow:
+      type: object
+      required: [document_id, vote, text_preview]
+      properties:
+        document_id: { type: string }
+        vote: { $ref: "#/components/schemas/LfVote" }
+        text_preview: { type: string }
+    LabelingFunctionPreviewResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/LabelingFunctionPreviewRow"
+    HinterSuggestion:
+      type: object
+      required: [keyword, score, positive_hits, negative_hits, example_document_ids]
+      properties:
+        keyword:
+          type: string
+          description: Lowercase token proposed as a single-keyword labeling function.
+        score:
+          type: number
+          format: float
+          description: Heuristic ranking score; higher is more confident.
+        positive_hits:
+          type: integer
+          description: Distinct gold-positive documents containing the token.
+        negative_hits:
+          type: integer
+          description: Distinct gold-negative documents containing the token.
+        example_document_ids:
+          type: array
+          items: { type: string }
+          description: Up to a few document ids that contain the token.
+    HinterSuggestionsBasis:
+      type: string
+      enum: [gold, tag_name, mixed]
+      description: >-
+        Which signal drove the ranking. `gold` = gold labels only, `tag_name`
+        = cold-start (no gold labels), `mixed` = gold labels plus tag-name
+        boost.
+    HinterSuggestionsResponse:
+      type: object
+      required: [tag_id, generated_at, basis, suggestions]
+      properties:
+        tag_id: { type: string }
+        generated_at: { type: string, format: date-time }
+        basis: { $ref: "#/components/schemas/HinterSuggestionsBasis" }
+        suggestions:
+          type: array
+          items:
+            $ref: "#/components/schemas/HinterSuggestion"
+    LabelPriorityMode:
+      type: string
+      enum: [uncertain, no_lf_fires, weak_positive]
+      description: >-
+        Active-learning ordering. `uncertain` ranks by smallest |vote_sum|
+        first (closest splits surface first). `no_lf_fires` lists docs the
+        latest run produced zero votes for. `weak_positive` lists docs
+        predicted positive on a single LF vote.
+    LabelPriorityVote:
+      type: object
+      required: [labeling_function_id, labeling_function_name, vote]
+      properties:
+        labeling_function_id: { type: string }
+        labeling_function_name: { type: string }
+        vote: { $ref: "#/components/schemas/LfVote" }
+    LabelPriorityRow:
+      type: object
+      required:
+        [id, text, metadata, char_length, created_at, vote_sum, vote_count, votes]
+      properties:
+        id: { type: string }
+        text: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+        char_length: { type: integer }
+        created_at: { type: string, format: date-time }
+        vote_sum:
+          type: integer
+          description: Sum of LF votes (-1/0/+1) cast on this doc in the run.
+        vote_count:
+          type: integer
+          description: Number of LFs that voted (non-zero) on this doc.
+        votes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LabelPriorityVote"
+    LabelPriorityResponse:
+      type: object
+      required: [run_id, mode, total, items]
+      properties:
+        run_id:
+          type: string
+          nullable: true
+          description: LF run the priority was computed against. Null when no run exists.
+        mode: { $ref: "#/components/schemas/LabelPriorityMode" }
+        total:
+          type: integer
+          description: Total docs matching the mode + filters before pagination.
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LabelPriorityRow"
+        message:
+          type: string
+          nullable: true
+          description: Human-readable hint when the result is empty (e.g. no run yet).
+    CoverageStatsResponse:
+      type: object
+      required:
+        [tag_id, sample_size, sample_no_lf_fires, sample_with_gold]
+      properties:
+        tag_id: { type: string }
+        run_id:
+          type: string
+          nullable: true
+        sample_size:
+          type: integer
+          description: Actual number of documents in the sample (<= requested).
+        sample_no_lf_fires:
+          type: integer
+          description: Documents in the sample that produced zero LF votes.
+        no_lf_fires_rate:
+          type: number
+          format: float
+          nullable: true
+        estimated_recall_ceiling:
+          type: number
+          format: float
+          nullable: true
+          description: 1 - no_lf_fires_rate. Upper bound on recall achievable by current LFs.
+        sample_with_gold:
+          type: integer
+          description: How many of the sampled docs already have a gold label for this tag.
+        message:
+          type: string
+          nullable: true
+    LfVote:
+      type: integer
+      enum: [-1, 0, 1]
+      description: 1 positive for tag, -1 negative, 0 abstain
+    LfRunStatus:
+      type: string
+      enum: [pending, running, completed, failed]
+    LfRunCreate:
+      type: object
+      required: [tag_id, labeling_function_ids]
+      properties:
+        tag_id: { type: string }
+        labeling_function_ids:
+          type: array
+          items: { type: string }
+          minItems: 1
+    LfRun:
+      type: object
+      required: [id, tag_id, labeling_function_ids, status, created_at]
+      properties:
+        id: { type: string }
+        tag_id: { type: string }
+        labeling_function_ids:
+          type: array
+          items: { type: string }
+        status:
+          $ref: "#/components/schemas/LfRunStatus"
+        error: { type: string, nullable: true }
+        documents_scanned: { type: integer }
+        votes_written: { type: integer }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+    SparseLabelMatrix:
+      type: object
+      required: [run_id, document_ids, labeling_function_ids, entries]
+      properties:
+        run_id: { type: string }
+        document_ids:
+          type: array
+          items: { type: string }
+        labeling_function_ids:
+          type: array
+          items: { type: string }
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/SparseLabelMatrixEntry"
+    SparseLabelMatrixEntry:
+      type: object
+      required: [d, l, v]
+      properties:
+        d: { type: integer, description: Index into document_ids }
+        l: { type: integer, description: Index into labeling_function_ids }
+        v:
+          $ref: "#/components/schemas/LfVote"
+    ProbabilisticLabel:
+      type: object
+      required: [document_id, tag_id, probability]
+      properties:
+        document_id: { type: string }
+        tag_id: { type: string }
+        probability: { type: number, minimum: 0, maximum: 1 }
+        conflict_score: { type: number, nullable: true }
+        entropy: { type: number, nullable: true }
+        updated_at: { type: string, format: date-time }
+    ProbabilisticLabelRow:
+      allOf:
+        - $ref: "#/components/schemas/ProbabilisticLabel"
+        - type: object
+          required: [predicted, positive_votes, negative_votes, text_preview, char_length]
+          properties:
+            predicted:
+              $ref: "#/components/schemas/LfVote"
+            positive_votes:
+              type: integer
+              description: How many LFs voted +1 for this (doc, tag) in the latest completed run.
+            negative_votes:
+              type: integer
+              description: How many LFs voted -1 for this (doc, tag) in the latest completed run.
+            text_preview:
+              type: string
+              description: Truncated body of the source document for compact rendering.
+            char_length:
+              type: integer
+    ProbabilisticLabelListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProbabilisticLabelRow"
+        total: { type: integer }
+        run_id:
+          type: string
+          nullable: true
+          description: Latest completed LF run for the requested tag, if any.
+    ProbabilityDistributionBin:
+      type: object
+      required: [lower, upper, count]
+      properties:
+        lower: { type: number }
+        upper: { type: number }
+        count: { type: integer }
+    ProbabilityDistributionResponse:
+      type: object
+      required:
+        - tag_id
+        - total
+        - predicted_positive
+        - predicted_negative
+        - predicted_abstain
+        - bins
+      properties:
+        tag_id: { type: string }
+        total: { type: integer }
+        predicted_positive: { type: integer }
+        predicted_negative: { type: integer }
+        predicted_abstain: { type: integer }
+        mean_probability:
+          type: number
+          nullable: true
+        bins:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProbabilityDistributionBin"
+    ProbabilisticLabelUpsert:
+      type: object
+      required: [document_id, tag_id, probability]
+      properties:
+        document_id: { type: string }
+        tag_id: { type: string }
+        probability: { type: number, minimum: 0, maximum: 1 }
+        conflict_score: { type: number, nullable: true }
+        entropy: { type: number, nullable: true }
+    GoldLabel:
+      type: object
+      required: [id, document_id, tag_id, value, created_at]
+      properties:
+        id: { type: string }
+        document_id: { type: string }
+        tag_id: { type: string }
+        value:
+          type: integer
+          enum: [-1, 0, 1]
+          description: Gold / manual label aligned with LF votes (1 positive, -1 negative, 0 abstain)
+        note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    GoldLabelCreate:
+      type: object
+      required: [document_id, tag_id, value]
+      properties:
+        document_id: { type: string }
+        tag_id: { type: string }
+        value:
+          type: integer
+          enum: [-1, 0, 1]
+        note: { type: string, nullable: true }
+    EvaluationCategory:
+      type: string
+      enum:
+        - true_positive
+        - true_negative
+        - false_positive
+        - false_negative
+        - abstain_on_positive
+        - abstain_on_negative
+        - gold_abstain
+      description: |
+        Per-document classification of an LF-run prediction against the gold label.
+        false_negative = gold +1 but prediction is -1.
+        abstain_on_positive = gold +1 but no LF fired (prediction 0); also counts as a missed positive in recall.
+        false_positive = gold -1 but prediction is +1.
+        abstain_on_negative = gold -1 but no LF fired; not a false positive but lowers coverage.
+        gold_abstain = gold value 0; excluded from precision/recall/F1.
+    EvaluationVote:
+      type: object
+      required: [labeling_function_id, labeling_function_name, vote]
+      properties:
+        labeling_function_id: { type: string }
+        labeling_function_name: { type: string }
+        vote: { $ref: "#/components/schemas/LfVote" }
+    EvaluationRow:
+      type: object
+      required: [document_id, text_preview, text, gold, predicted, vote_sum, category, votes]
+      properties:
+        document_id: { type: string }
+        text_preview: { type: string, description: "Truncated text for compact rendering; capped at text_preview_chars." }
+        text: { type: string, description: "Full document body so the client can offer an expand control." }
+        gold: { $ref: "#/components/schemas/LfVote" }
+        predicted: { $ref: "#/components/schemas/LfVote" }
+        vote_sum:
+          type: integer
+          description: Sum of LF votes; sign decides the prediction.
+        category: { $ref: "#/components/schemas/EvaluationCategory" }
+        votes:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvaluationVote"
+    EvaluationSummary:
+      type: object
+      required:
+        - total_gold
+        - considered
+        - true_positive
+        - true_negative
+        - false_positive
+        - false_negative
+        - abstain_on_positive
+        - abstain_on_negative
+        - gold_abstain
+      properties:
+        total_gold:
+          type: integer
+          description: All gold-labeled docs for the tag (incl. gold == 0)
+        considered:
+          type: integer
+          description: Gold-labeled docs with gold != 0; the validation set used for metrics
+        true_positive: { type: integer }
+        true_negative: { type: integer }
+        false_positive: { type: integer }
+        false_negative: { type: integer }
+        abstain_on_positive:
+          type: integer
+          description: Gold +1 but prediction abstained (vote sum 0); also counted as missed positive in recall
+        abstain_on_negative:
+          type: integer
+          description: Gold -1 but prediction abstained; not a false positive
+        gold_abstain:
+          type: integer
+          description: Gold value 0; not counted in precision/recall
+        precision:
+          type: number
+          nullable: true
+          description: TP / (TP + FP)
+        recall:
+          type: number
+          nullable: true
+          description: TP / (TP + FN + abstain_on_positive)
+        f1:
+          type: number
+          nullable: true
+        coverage:
+          type: number
+          nullable: true
+          description: Fraction of considered docs where the prediction is non-abstain
+    EvaluationResponse:
+      type: object
+      required: [tag_id, summary, rows]
+      properties:
+        tag_id: { type: string }
+        run_id:
+          type: string
+          nullable: true
+        run_completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        summary:
+          $ref: "#/components/schemas/EvaluationSummary"
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvaluationRow"
+        truncated:
+          type: boolean
+          description: True when more rows existed than the limit; summary counts are exact regardless.
+        message:
+          type: string
+          description: Optional human-readable explanation (e.g. when no run exists yet)

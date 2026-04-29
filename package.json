@@ -1,0 +1,11 @@
+{
+  "name": "hinter-factory",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @hinter/web --filter @hinter/ml dev",
+    "build": "pnpm --filter @hinter/web build",
+    "contracts:generate": "pnpm --filter @hinter/contracts generate",
+    "lint": "pnpm -r lint"
+  }
+}

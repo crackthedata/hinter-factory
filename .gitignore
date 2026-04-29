@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -195,9 +195,6 @@ cython_debug/
 .pypirc
 
 # Cursor
-#  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
-#  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
-#  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
 
@@ -205,3 +202,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
+
+# Local app data
+/data/
+services/ml/data/
+
+# SQLite databases (catches stray files outside the dirs above, e.g. when
+# HINTER_DATABASE_URL points somewhere custom or pytest temp DBs leak out).
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

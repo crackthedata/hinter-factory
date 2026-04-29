@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-ink-950 text-ink-200 antialiased;
+}
+
+a {
+  @apply text-accent-500 hover:text-accent-600 underline-offset-4 hover:underline;
+}

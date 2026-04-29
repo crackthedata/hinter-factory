@@ -1,0 +1,21 @@
+{
+  "name": "@hinter/contracts",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./openapi": "./openapi/openapi.yaml"
+  },
+  "scripts": {
+    "generate": "openapi-typescript ./openapi/openapi.yaml -o ./src/generated/api.ts",
+    "build": "pnpm run generate",
+    "dev": "openapi-typescript ./openapi/openapi.yaml -o ./src/generated/api.ts --watch"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.6.1"
+  }
+}
