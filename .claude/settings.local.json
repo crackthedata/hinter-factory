@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_predictions.py -v)",
+      "Bash(python -m pytest tests/test_predictions.py -v --tb=short)",
+      "Bash(python -m pytest tests/ -v --tb=short)"
+    ]
+  }
+}

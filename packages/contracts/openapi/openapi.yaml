@@ -15,6 +15,7 @@ servers:
 tags:
   - name: projects
   - name: documents
+  - name: predictions
   - name: tags
   - name: labelingFunctions
   - name: lfRuns
@@ -354,6 +355,58 @@ paths:
                 $ref: "#/components/schemas/CoverageStatsResponse"
         "404":
           description: tag not found
+  /v1/predictions:
+    post:
+      tags: [predictions]
+      operationId: batchPredict
+      summary: Upload a CSV and get predictions for all tags in the project
+      description: >-
+        Ingests a CSV file into the project (documents are saved) and generates
+        predictions (label + probability) for all enabled labeling functions,
+        grouped by tag. Returns results in JSON or CSV format.
+      parameters:
+        - in: query
+          name: format
+          required: false
+          schema: { type: string, enum: [json, csv], default: json }
+          description: Response format (json or csv)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, project_id]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: CSV or JSON file to predict on
+                text_column:
+                  type: string
+                  default: text
+                  description: Name of the column containing document text
+                id_column:
+                  type: string
+                  description: Optional column name to use as document ID
+                project_id:
+                  type: string
+                  description: Project ID to scope predictions to
+      responses:
+        "200":
+          description: Predictions generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PredictionResponse"
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid request (missing file, unparseable format, etc.)
+        "404":
+          description: Project not found
   /v1/tags:
     get:
       tags: [tags]
@@ -1396,3 +1449,66 @@ components:
         message:
           type: string
           description: Optional human-readable explanation (e.g. when no run exists yet)
+    PredictionResult:
+      type: object
+      required: [tag_name, predicted_label, probability, positive_votes, negative_votes, conflict_score, entropy]
+      properties:
+        tag_name:
+          type: string
+          description: Name of the tag this prediction is for
+        predicted_label:
+          $ref: "#/components/schemas/LfVote"
+        probability:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Predicted probability that the tag applies to this document (Laplace-smoothed majority vote)
+        positive_votes:
+          type: integer
+          description: Number of labeling functions that voted +1
+        negative_votes:
+          type: integer
+          description: Number of labeling functions that voted -1
+        conflict_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: min(pos, neg) / max(pos, neg) when both directions voted, else 0. Measures voting agreement.
+        entropy:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Binary entropy of the probability in bits. Higher = less confident.
+    PredictionDocument:
+      type: object
+      required: [id, original_id, text, metadata, predictions]
+      properties:
+        id:
+          type: string
+          description: Internal document ID (generated UUID)
+        original_id:
+          type: string
+          description: Original ID from the input CSV/JSON
+        text:
+          type: string
+          description: Full document text
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Additional columns from the input file as key-value pairs
+        predictions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PredictionResult"
+    PredictionResponse:
+      type: object
+      required: [documents]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/PredictionDocument"
+        ingest_errors:
+          type: array
+          items: { type: string }
+          description: Any errors encountered during CSV/JSON parsing

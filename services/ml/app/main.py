@@ -14,6 +14,7 @@ from app.routers import (
     gold_labels,
     labeling_functions,
     lf_runs,
+    predictions,
     probabilistic,
     projects,
     tags,
@@ -41,6 +42,7 @@ app.add_middleware(
 
 app.include_router(projects.router)
 app.include_router(documents.router)
+app.include_router(predictions.router)
 app.include_router(tags.router)
 app.include_router(labeling_functions.router)
 app.include_router(lf_runs.router)
