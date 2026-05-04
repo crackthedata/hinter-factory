@@ -201,6 +201,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/predictions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload a CSV and get predictions for all tags in the project
+         * @description Ingests a CSV file into the project (documents are saved) and generates predictions (label + probability) for all enabled labeling functions, grouped by tag. Returns results in JSON or CSV format.
+         */
+        post: operations["batchPredict"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/tags": {
         parameters: {
             query?: never;
@@ -831,6 +851,39 @@ export interface components {
             /** @description Optional human-readable explanation (e.g. when no run exists yet) */
             message?: string;
         };
+        PredictionResult: {
+            /** @description Name of the tag this prediction is for */
+            tag_name: string;
+            predicted_label: components["schemas"]["LfVote"];
+            /** @description Predicted probability that the tag applies to this document (Laplace-smoothed majority vote) */
+            probability: number;
+            /** @description Number of labeling functions that voted +1 */
+            positive_votes: number;
+            /** @description Number of labeling functions that voted -1 */
+            negative_votes: number;
+            /** @description min(pos, neg) / max(pos, neg) when both directions voted, else 0. Measures voting agreement. */
+            conflict_score: number;
+            /** @description Binary entropy of the probability in bits. Higher = less confident. */
+            entropy: number;
+        };
+        PredictionDocument: {
+            /** @description Internal document ID (generated UUID) */
+            id: string;
+            /** @description Original ID from the input CSV/JSON */
+            original_id: string;
+            /** @description Full document text */
+            text: string;
+            /** @description Additional columns from the input file as key-value pairs */
+            metadata: {
+                [key: string]: unknown;
+            };
+            predictions: components["schemas"]["PredictionResult"][];
+        };
+        PredictionResponse: {
+            documents: components["schemas"]["PredictionDocument"][];
+            /** @description Any errors encountered during CSV/JSON parsing */
+            ingest_errors?: string[];
+        };
     };
     responses: never;
     parameters: {
@@ -1226,6 +1279,63 @@ export interface operations {
                 };
             };
             /** @description tag not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    batchPredict: {
+        parameters: {
+            query?: {
+                /** @description Response format (json or csv) */
+                format?: "json" | "csv";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /**
+                     * Format: binary
+                     * @description CSV or JSON file to predict on
+                     */
+                    file: string;
+                    /**
+                     * @description Name of the column containing document text
+                     * @default text
+                     */
+                    text_column?: string;
+                    /** @description Optional column name to use as document ID */
+                    id_column?: string;
+                    /** @description Project ID to scope predictions to */
+                    project_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Predictions generated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PredictionResponse"];
+                    "text/csv": string;
+                };
+            };
+            /** @description Invalid request (missing file, unparseable format, etc.) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Project not found */
             404: {
                 headers: {
                     [name: string]: unknown;
