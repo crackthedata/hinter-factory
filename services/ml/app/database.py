@@ -26,6 +26,7 @@ if _is_sqlite:
     def _set_sqlite_pragmas(dbapi_conn, _):
         dbapi_conn.execute("PRAGMA journal_mode=WAL")
         dbapi_conn.execute("PRAGMA synchronous=NORMAL")
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
