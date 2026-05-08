@@ -39,7 +39,11 @@ def _compile_regex(config: dict[str, Any]) -> re.Pattern[str]:
 
 def execute_regex(config: dict[str, Any], text: str) -> int:
     rx = _compile_regex(config)
-    return 1 if rx.search(text) else 0
+    match = rx.search(text)
+    return_value = config.get("return_value", 1)
+    if not isinstance(return_value, int) or return_value not in (-1, 0, 1):
+        raise LfConfigError("regex 'return_value' must be -1, 0, or 1")
+    return return_value if match else 0
 
 
 def execute_keywords(config: dict[str, Any], text: str) -> int:
@@ -47,19 +51,25 @@ def execute_keywords(config: dict[str, Any], text: str) -> int:
     if not isinstance(keywords, list) or not all(isinstance(k, str) for k in keywords):
         raise LfConfigError("keywords labeling functions require 'keywords': string[]")
     mode = str(config.get("mode", "any")).lower()
+    return_value = config.get("return_value", 1)
+    if not isinstance(return_value, int) or return_value not in (-1, 0, 1):
+        raise LfConfigError("keywords 'return_value' must be -1, 0, or 1")
     hay = text.lower()
     kws = [k.lower() for k in keywords if k]
     if not kws:
         return 0
     if mode == "all":
-        return 1 if all(k in hay for k in kws) else 0
-    return 1 if any(k in hay for k in kws) else 0
+        return return_value if all(k in hay for k in kws) else 0
+    return return_value if any(k in hay for k in kws) else 0
 
 
 def execute_structural(config: dict[str, Any], text: str) -> int:
     n = len(text)
     caps = _caps_ratio(text)
     punct = _punctuation_ratio(text)
+    return_value = config.get("return_value", 1)
+    if not isinstance(return_value, int) or return_value not in (-1, 0, 1):
+        raise LfConfigError("structural 'return_value' must be -1, 0, or 1")
 
     checks: list[tuple[str, float, float]] = []
 
@@ -86,7 +96,7 @@ def execute_structural(config: dict[str, Any], text: str) -> int:
             return 0
         if op == "<=" and not (cur <= bound):
             return 0
-    return 1
+    return return_value
 
 
 def execute_labeling_function(lf_type: str, config: dict[str, Any], text: str) -> int:
