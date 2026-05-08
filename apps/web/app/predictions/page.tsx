@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { components } from "@hinter/contracts";
 
@@ -404,6 +404,27 @@ function PredictionRow({
         ? "border-red-500/30"
         : "border-ink-800";
 
+  const [fullText, setFullText] = useState<string | null>(null);
+  const fetchedRef = useRef(false);
+
+  useEffect(() => {
+    if (!expanded || fetchedRef.current) return;
+    fetchedRef.current = true;
+    void (async () => {
+      try {
+        const res = await mlFetch(`/api/ml/v1/documents/${row.document_id}`);
+        if (res.ok) {
+          const body = (await res.json()) as { text: string };
+          setFullText(body.text);
+        }
+      } catch {
+        // fall back to text_preview on error
+      }
+    })();
+  }, [expanded, row.document_id]);
+
+  const displayText = expanded && fullText !== null ? fullText : row.text_preview;
+
   return (
     <div className={`rounded-md border ${borderColor} bg-ink-900/30 p-3`}>
       <div className="flex flex-wrap items-center gap-3 text-xs">
@@ -450,7 +471,7 @@ function PredictionRow({
           expanded ? "" : "max-h-24 overflow-hidden"
         }`}
       >
-        {row.text_preview || "(empty document)"}
+        {displayText || "(empty document)"}
       </pre>
     </div>
   );
