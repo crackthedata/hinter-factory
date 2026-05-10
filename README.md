@@ -188,6 +188,20 @@ The schema is created via `Base.metadata.create_all` on startup. An idempotent m
 
 The migration is safe to run on every boot. There is **no** auto-created "Default" project anymore — `project_id` is mandatory on every scoped request, and `app/project_scope.py:resolve_project_id` returns 400 when it's missing.
 
+## Headless Batch Processing
+
+You can run labeling functions across a new CSV file without using the web UI or importing the documents into a project. The headless script reads an input CSV, applies a project's enabled labeling functions, computes probabilities, and writes a new CSV with the probability columns appended.
+
+From `services/ml` with the venv activated:
+
+```bash
+python headless.py \
+  --project-name "Your Project Name" \
+  --input-csv path/to/input.csv \
+  --output-csv path/to/output.csv \
+  --text-column "text_column_name"
+```
+
 ## Python tests
 
 From `services/ml` with the venv activated:
