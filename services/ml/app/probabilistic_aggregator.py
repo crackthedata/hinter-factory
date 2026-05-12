@@ -150,6 +150,8 @@ def write_probabilistic_labels_for_run(
             existing.probability = agg.probability
             existing.conflict_score = agg.conflict_score
             existing.entropy = agg.entropy
+            existing.positive_votes = agg.positive_votes
+            existing.negative_votes = agg.negative_votes
             existing.updated_at = now
         else:
             db.add(
@@ -160,6 +162,8 @@ def write_probabilistic_labels_for_run(
                     probability=agg.probability,
                     conflict_score=agg.conflict_score,
                     entropy=agg.entropy,
+                    positive_votes=agg.positive_votes,
+                    negative_votes=agg.negative_votes,
                     updated_at=now,
                 )
             )

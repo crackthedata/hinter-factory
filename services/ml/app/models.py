@@ -125,6 +125,8 @@ class ProbabilisticLabel(Base):
     probability: Mapped[float] = mapped_column(nullable=False)
     conflict_score: Mapped[float | None] = mapped_column(nullable=True)
     entropy: Mapped[float | None] = mapped_column(nullable=True)
+    positive_votes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    negative_votes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 

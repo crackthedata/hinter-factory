@@ -1,7 +1,7 @@
 """Heuristic candidate-keyword miner for the "Suggested hinters" panel.
 
 Given a tag, propose new keyword labeling functions by mining three signal
-sources for *positive* (+1) hinters and one for *negative* (-1) hinters:
+sources for *positive* (+1) hinters and two for *negative* (-1) hinters:
 
 Positive hinter signal sources
 --------------------------------
@@ -18,6 +18,10 @@ Negative hinter signal sources
 --------------------------------
 1. Gold-labeled documents (negative class) — tokens more frequent in gold-−1
    docs than gold-+1 docs.
+2. Missed-negative documents from the latest completed LF run — gold-−1 docs
+   where the run abstained (vote_sum == 0) or produced a false-positive
+   (vote_sum > 0) receive a symmetric score boost so suggestions also target
+   the precision gaps, not just the recall gaps.
 
 Other invariants
 -----------------
@@ -194,6 +198,51 @@ def _missed_positive_doc_ids(
     return missed[:_MAX_MISSED_DOCS]
 
 
+def _missed_negative_doc_ids(
+    db: Session,
+    *,
+    tag_id: str,
+    gold_negative_ids: set[str],
+) -> list[str]:
+    """Return gold-negative document IDs that the latest completed run missed.
+
+    "Missed" covers two evaluation buckets:
+    - *false_positive*: vote_sum > 0 (LFs actively voted for a true negative).
+    - *abstain_on_negative*: vote_sum == 0 (no LF fired on a true negative).
+
+    Returns an empty list when there is no completed run yet for the tag, or
+    when ``gold_negative_ids`` is empty.
+    """
+    if not gold_negative_ids:
+        return []
+
+    run = db.scalar(
+        select(LfRun)
+        .where(LfRun.tag_id == tag_id, LfRun.status == "completed")
+        .order_by(LfRun.completed_at.desc(), LfRun.created_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        return []
+
+    doc_ids_list = list(gold_negative_ids)
+    vote_rows = db.scalars(
+        select(LfRunVote).where(
+            LfRunVote.run_id == run.id,
+            LfRunVote.document_id.in_(doc_ids_list),
+        )
+    ).all()
+
+    vote_sums: dict[str, int] = defaultdict(int)
+    for v in vote_rows:
+        vote_sums[v.document_id] += int(v.vote)
+
+    # vote_sum == 0 catches both "no LF fired" and "exact tie"; vote_sum > 0
+    # means a false positive — both are misses for the negative class.
+    missed = [doc_id for doc_id in doc_ids_list if vote_sums.get(doc_id, 0) >= 0]
+    return missed[:_MAX_MISSED_DOCS]
+
+
 def suggest_keywords_for_tag(
     db: Session,
     *,
@@ -273,6 +322,20 @@ def suggest_keywords_for_tag(
             if len(pos_examples[tok]) < _EXAMPLE_DOC_LIMIT:
                 pos_examples[tok].append(doc.id)
 
+    # Process missed-negative docs (abstain-on-negative + false-positive from
+    # the latest run) so the negative scorer can boost tokens that appear there.
+    missed_neg_ids = _missed_negative_doc_ids(
+        db, tag_id=tag_id, gold_negative_ids=set(neg_doc_ids)
+    )
+    missed_neg_docs = _fetch_documents(db, missed_neg_ids) if missed_neg_ids else []
+    missed_neg_df: dict[str, int] = defaultdict(int)
+    for doc in missed_neg_docs:
+        toks = _tokenize(doc.text)
+        for tok in toks:
+            missed_neg_df[tok] += 1
+            if len(neg_examples[tok]) < _EXAMPLE_DOC_LIMIT:
+                neg_examples[tok].append(doc.id)
+
     for doc in pos_docs:
         toks = _tokenize(doc.text)
         for tok in toks:
@@ -314,6 +377,9 @@ def suggest_keywords_for_tag(
         scored_pos[tok] = base_score + miss_boost
 
     # Negative hinter candidates: tokens more frequent in gold-negative docs.
+    # Tokens that appear in missed-negative docs (abstain-on-negative or
+    # false-positive from the latest run) receive the same additive boost as
+    # missed-positive tokens do for positive hinters, targeting precision gaps.
     for tok, n in neg_df.items():
         if tok in covered_neg:
             continue
@@ -322,7 +388,9 @@ def suggest_keywords_for_tag(
             continue
         if n <= p:
             continue
-        scored_neg[tok] = math.log((n + 0.5) / (p + 0.5)) * math.log(1 + n)
+        base_score = math.log((n + 0.5) / (p + 0.5)) * math.log(1 + n)
+        miss_boost = _MISS_BOOST * math.log(1 + missed_neg_df.get(tok, 0))
+        scored_neg[tok] = base_score + miss_boost
 
     # Cold-start: fall back to a corpus sample when there are zero gold labels.
     if not has_gold:

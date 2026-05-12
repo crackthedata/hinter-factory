@@ -772,7 +772,7 @@ export default function ExplorePage() {
                   ) : null}
                 </td>
                 {goldTagId ? (
-                  <td className="px-2 py-2 align-middle">
+                  <td className="px-2 py-2 align-top">
                     <div className="flex flex-wrap gap-1">
                       {([1, 0, -1] as const).map((v) => {
                         const active = goldByDocId[d.id] === v;

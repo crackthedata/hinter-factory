@@ -56,6 +56,7 @@ export default function StudioPage() {
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingLfId, setDeletingLfId] = useState<string | null>(null);
   const [batchRunning, setBatchRunning] = useState(false);
+  const [runTotalDocs, setRunTotalDocs] = useState(0);
 
   useEffect(() => {
     setLfConfig(DEFAULT_CONFIG[lfType]);
@@ -375,7 +376,19 @@ export default function StudioPage() {
       return;
     }
     setBatchRunning(true);
+    setRunTotalDocs(0);
     try {
+      // Fetch total document count so the progress bar has a denominator.
+      try {
+        const countRes = await mlFetch("/api/ml/v1/documents?limit=1");
+        if (countRes.ok) {
+          const countData = (await countRes.json()) as { total: number };
+          setRunTotalDocs(countData.total ?? 0);
+        }
+      } catch {
+        /* non-fatal — progress bar will be indeterminate */
+      }
+
       const res = await mlFetch("/api/ml/v1/lf-runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -396,9 +409,41 @@ export default function StudioPage() {
         setError(detail);
         return;
       }
-      const run = (await res.json()) as LfRun;
+
+      let run = (await res.json()) as LfRun;
       setLastRun(run);
-      setMessage(`Run ${run.id} — ${run.status}`);
+      setMessage(`Running… (${run.documents_scanned} docs scanned)`);
+
+      // The run executes in a background task on the server — poll until done.
+      const POLL_INTERVAL_MS = 1500;
+      const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+      const deadline = Date.now() + POLL_TIMEOUT_MS;
+      while (run.status === "running" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        try {
+          const poll = await mlFetch(`/api/ml/v1/lf-runs/${run.id}`);
+          if (poll.ok) {
+            run = (await poll.json()) as LfRun;
+            setLastRun(run);
+            setMessage(
+              run.status === "running"
+                ? `Running… (${run.documents_scanned} docs scanned, ${run.votes_written} votes)`
+                : `Run ${run.id} — ${run.status}`,
+            );
+          }
+        } catch {
+          /* transient poll error — keep waiting */
+        }
+      }
+
+      if (run.status === "running") {
+        setError("Run timed out on the client side — the server may still be working. Refresh the page to check.");
+        return;
+      }
+      if (run.status === "failed") {
+        setError(run.error ?? "Run failed");
+        return;
+      }
       if (run.status === "completed") {
         const m = await mlFetch(`/api/ml/v1/lf-runs/${run.id}/matrix`);
         if (m.ok) {
@@ -786,7 +831,7 @@ export default function StudioPage() {
             </button>
           ) : null}
           {batchRunning ? (
-            <span className="text-xs text-ink-400">Running…</span>
+            <RunProgress scanned={lastRun?.documents_scanned ?? 0} total={runTotalDocs} votes={lastRun?.votes_written ?? 0} />
           ) : lastRun ? (
             <span className={`text-xs ${lastRun.status === "completed" ? "text-emerald-400" : lastRun.status === "failed" ? "text-red-400" : "text-ink-400"}`}>
               {lastRun.status === "completed"
@@ -808,11 +853,40 @@ export default function StudioPage() {
         </div>
         <div>
           <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-500">Sparse matrix export</h3>
+
           <pre className="mt-2 max-h-80 overflow-auto rounded-md border border-ink-900 bg-black/40 p-3 text-[11px] text-ink-200">
             {matrix ? JSON.stringify(matrix, null, 2) : "// Run a completed batch to populate"}
           </pre>
         </div>
       </section>
+    </div>
+  );
+}
+
+function RunProgress({ scanned, total, votes }: { scanned: number; total: number; votes: number }) {
+  const hasDenominator = total > 0;
+  const pct = hasDenominator ? Math.min(100, Math.round((scanned / total) * 100)) : null;
+  const label = scanned === 0
+    ? "Starting…"
+    : `${scanned.toLocaleString()} / ${hasDenominator ? total.toLocaleString() : "?"} docs${votes > 0 ? ` · ${votes.toLocaleString()} votes` : ""}`;
+
+  return (
+    <div className="flex min-w-[220px] flex-col gap-1">
+      <div className="flex items-baseline justify-between text-xs text-ink-400">
+        <span>{label}</span>
+        {pct !== null ? <span className="font-mono">{pct}%</span> : null}
+      </div>
+      {hasDenominator ? (
+        <progress
+          className="h-1.5 w-full overflow-hidden rounded-full bg-ink-800 [&::-moz-progress-bar]:bg-accent-500 [&::-webkit-progress-bar]:bg-ink-800 [&::-webkit-progress-value]:bg-accent-500"
+          value={scanned}
+          max={total}
+        />
+      ) : (
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-ink-800">
+          <div className="h-full w-1/3 animate-pulse rounded-full bg-accent-500" />
+        </div>
+      )}
     </div>
   );
 }
