@@ -133,13 +133,23 @@ export default function EvaluationPage() {
   const [visibleCategories, setVisibleCategories] = useState<Set<EvaluationCategory>>(
     () => new Set(["false_negative", "false_positive", "abstain_on_positive"]),
   );
+  const [goldOverrides, setGoldOverrides] = useState<Record<string, LfVote>>({});
+  const [goldSavingId, setGoldSavingId] = useState<string | null>(null);
+  const [resultsStale, setResultsStale] = useState(false);
 
   useEffect(() => {
     setTagId("");
     setRunId("");
     setRuns([]);
     setData(null);
+    setGoldOverrides({});
+    setResultsStale(false);
   }, [projectId]);
+
+  useEffect(() => {
+    setGoldOverrides({});
+    setResultsStale(false);
+  }, [tagId, runId]);
 
   useEffect(() => {
     if (!projectId) {
@@ -208,6 +218,8 @@ export default function EvaluationPage() {
       } else {
         const body = (await res.json()) as EvaluationResponse;
         setData(body);
+        setGoldOverrides({});
+        setResultsStale(false);
       }
     } catch (e) {
       setError(describeMlFetchError(e));
@@ -257,6 +269,31 @@ export default function EvaluationPage() {
       else next.add(cat);
       return next;
     });
+  };
+
+  const setGoldVote = async (documentId: string, value: LfVote) => {
+    if (!tagId) return;
+    const prevFromApi = allRows.find((r) => r.document_id === documentId)?.gold ?? null;
+    setGoldOverrides((m) => ({ ...m, [documentId]: value }));
+    setGoldSavingId(documentId);
+    try {
+      const res = await mlFetch("/api/ml/v1/gold-labels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: documentId, tag_id: tagId, value }),
+      });
+      if (!res.ok) throw new Error("save failed");
+      setResultsStale(true);
+    } catch {
+      setGoldOverrides((m) => {
+        const next = { ...m };
+        if (prevFromApi === null) delete next[documentId];
+        else next[documentId] = prevFromApi;
+        return next;
+      });
+    } finally {
+      setGoldSavingId(null);
+    }
   };
 
   const selectedRunInfo = useMemo(() => {
@@ -389,6 +426,12 @@ export default function EvaluationPage() {
         </div>
       ) : null}
 
+      {resultsStale ? (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          Gold labels updated — click <strong>Refresh</strong> to recalculate categories and metrics.
+        </div>
+      ) : null}
+
       {summary && summary.considered > 0 ? (
         <section className="space-y-4">
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -439,6 +482,9 @@ export default function EvaluationPage() {
                         onToggle={() => toggleDoc(r.document_id)}
                         textExpanded={expandedTexts.has(r.document_id)}
                         onToggleText={() => toggleText(r.document_id)}
+                        currentGold={goldOverrides[r.document_id] ?? r.gold}
+                        onGoldVote={setGoldVote}
+                        goldSaving={goldSavingId === r.document_id}
                       />
                     ))}
                   </div>
@@ -496,19 +542,42 @@ function ErrorRow({
   onToggle,
   textExpanded,
   onToggleText,
+  currentGold,
+  onGoldVote,
+  goldSaving,
 }: {
   row: EvaluationRow;
   expanded: boolean;
   onToggle: () => void;
   textExpanded: boolean;
   onToggleText: () => void;
+  currentGold: LfVote;
+  onGoldVote: (docId: string, value: LfVote) => void;
+  goldSaving: boolean;
 }) {
   const color = CATEGORY_COLOR[row.category];
   return (
     <div className={`rounded-md border ${color} p-3`}>
       <div className="flex flex-wrap items-center gap-3 text-xs">
         <span className="font-mono text-ink-500">{row.document_id.slice(0, 8)}…</span>
-        <Badge label="gold" value={formatVote(row.gold)} tone={row.gold === 1 ? "emerald" : row.gold === -1 ? "red" : "neutral"} />
+        <div className="flex items-center gap-1" title="Assign or correct the gold label for this document">
+          <span className="text-ink-500">gold</span>
+          {([1, 0, -1] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              disabled={goldSaving}
+              onClick={() => onGoldVote(row.document_id, v)}
+              className={`rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors disabled:opacity-40 ${
+                currentGold === v
+                  ? "bg-accent-600 text-white"
+                  : "border border-ink-600 bg-ink-950 text-ink-200 hover:border-accent-500"
+              }`}
+            >
+              {v === 1 ? "+1" : v === 0 ? "0" : "−1"}
+            </button>
+          ))}
+        </div>
         <Badge
           label="pred"
           value={formatVote(row.predicted)}

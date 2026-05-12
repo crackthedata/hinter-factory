@@ -113,6 +113,7 @@ That runs `openapi-typescript` in `@hinter/contracts` and overwrites `packages/c
   - **Reading long documents.** Each result row truncates to ~220 characters. Click **Show full** on a row to expand it (displayed with preserved whitespace), or **Expand all** above the table to expand every row on the page.
   - **Manual gold labels.** After you create tags in LF Studio, pick a tag at the bottom of the Explore filters and vote **+1** (positive for tag), **0** (abstain / unsure), or **−1** (negative) per document. Labels apply to the documents shown on the current page (default limit 50). The same `+1 / 0 / −1` semantics apply to LF votes.
 - **LF Studio:** Author regex, keyword, and structural labeling functions; preview votes on sample rows; run a batch over the corpus; export a sparse label matrix from a completed run.
+  - **Suggested hinters.** After you gold-label even a few documents, the **Suggested hinters** panel mines your gold-positive and gold-negative documents for statistically predictive keywords. Each suggestion comes with a direction (`+1` or `−1`), hit counts for both gold classes, and a heuristic confidence score. Click **Add as +1 LF** / **Add as −1 LF** to create a `keywords` labeling function in one step. Before any gold labels exist, the panel falls back to tokens derived from the tag name itself ("cold-start"). The underlying miner is `suggest_keywords_for_tag` in `services/ml/app/suggestions.py`; it is invoked on demand by `GET /v1/labeling-functions/suggestions`.
 - **Evaluation:** For a chosen tag, treats every gold-labeled document as a validation example, aggregates LF votes from a run, and surfaces the documents the system would currently get **wrong** so you can fix the responsible LFs.
   - **Validation set.** All documents with a gold label whose value is `+1` or `−1` for the selected tag. Gold value `0` is reported as `gold_abstain` and excluded from precision / recall / F1.
   - **Predicted label.** Sum-of-votes majority over the run's LF votes per document: sum > 0 → predict `+1`, sum < 0 → predict `−1`, sum == 0 → abstain. Pure function in `services/ml/app/evaluation.py:aggregate_vote` if you want to swap in a label model later.
@@ -133,11 +134,16 @@ That runs `openapi-typescript` in `@hinter/contracts` and overwrites `packages/c
 1. **Pick (or create) a project** from the header selector or `/projects`. Everything you do next is scoped to it.
 2. **Ingest a CSV/JSON corpus** in *Explore* (set the right text column, click Upload).
 3. **Create a tag** in *LF Studio* (e.g. "is_invoice").
-4. **Author one or more labeling functions** for that tag (regex, keywords, structural). Use **Preview** on a few sample docs.
-5. **Gold-label a validation set** in *Explore*: pick the tag, then vote `+1` / `−1` on a couple dozen documents you're confident about. Use `0` only when you genuinely can't tell.
-6. **Run the LFs** on the full corpus from *LF Studio*.
-7. **Open *Evaluation***, pick the tag. Read the false-negative and false-positive lists, expand the per-LF breakdowns, and use what you learn to tighten or add LFs in Studio. Re-run and re-evaluate.
-8. **Share work between machines.** From `/projects`, **Export** the project to a JSON file and hand it off; on the other instance, **Import** that file to recreate the entire workspace.
+4. **Manually label some documents first** in *Explore*: pick the tag in the filter bar, then vote `+1` (positive for this tag), `0` (unsure), or `−1` (negative) on a handful of documents you're confident about — even 10–20 labels is enough to seed the next step. Do this *before* authoring LFs so the suggestion miner has signal to work with.
+5. **Review suggested hinters** in *LF Studio* → **Suggested hinters** panel. The miner (`suggest_keywords_for_tag`) compares token frequencies across your gold-positive and gold-negative documents and surfaces keyword candidates with a `+1` or `−1` direction:
+   - A **+1 suggestion** is a token that appears more often in your gold-positive documents — clicking **Add as +1 LF** creates a `keywords` LF that votes `+1` whenever that word appears.
+   - A **−1 suggestion** is a token more frequent in your gold-negative documents — **Add as −1 LF** creates a `keywords` LF that actively votes *against* the tag.
+   - Use **Dismiss** to skip a candidate; the panel refreshes with fresh suggestions automatically.
+6. **Author additional labeling functions** by hand in *LF Studio* (regex, keywords, structural) for patterns the suggestions didn't cover. Use **Preview** to sanity-check on sample docs before running a full batch.
+7. **Run the LFs** on the full corpus from *LF Studio*.
+8. **Open *Evaluation***, pick the tag. Read the false-negative and false-positive lists, expand the per-LF breakdowns, and use what you learn to tighten or add LFs in Studio. Add more gold labels in *Explore* as you discover edge cases — each new label improves future suggestion quality.
+9. Re-run and re-evaluate. Repeat until metrics are good enough.
+10. **Share work between machines.** From `/projects`, **Export** the project to a JSON file and hand it off; on the other instance, **Import** that file to recreate the entire workspace.
 
 ## API surface
 

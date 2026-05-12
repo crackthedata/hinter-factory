@@ -55,6 +55,7 @@ export default function StudioPage() {
   const [editEnabled, setEditEnabled] = useState(true);
   const [savingEdit, setSavingEdit] = useState(false);
   const [deletingLfId, setDeletingLfId] = useState<string | null>(null);
+  const [batchRunning, setBatchRunning] = useState(false);
 
   useEffect(() => {
     setLfConfig(DEFAULT_CONFIG[lfType]);
@@ -158,8 +159,12 @@ export default function StudioPage() {
 
   const selectedTag = useMemo(() => tags.find((t) => t.id === selectedTagId), [tags, selectedTagId]);
 
-  const visibleSuggestions = useMemo(
-    () => suggestions.filter((s) => !dismissed.has(s.keyword)),
+  const visiblePositive = useMemo(
+    () => suggestions.filter((s) => s.return_value === 1 && !dismissed.has(s.keyword)),
+    [suggestions, dismissed],
+  );
+  const visibleNegative = useMemo(
+    () => suggestions.filter((s) => s.return_value === -1 && !dismissed.has(s.keyword)),
     [suggestions, dismissed],
   );
 
@@ -234,13 +239,14 @@ export default function StudioPage() {
       next.add(keyword);
       return next;
     });
+    const direction = suggestion.return_value === -1 ? "neg" : "pos";
     try {
       const { data, error: err } = await api.POST("/v1/labeling-functions", {
         body: {
           tag_id: selectedTagId,
-          name: `suggested: ${keyword}`,
+          name: `suggested ${direction}: ${keyword}`,
           type: "keywords",
-          config: { keywords: [keyword], mode: "any" },
+          config: { keywords: [keyword], mode: "any", return_value: suggestion.return_value },
           enabled: true,
         },
       });
@@ -368,17 +374,29 @@ export default function StudioPage() {
       setError("Pick at least one labeling function");
       return;
     }
+    setBatchRunning(true);
     try {
       const res = await mlFetch("/api/ml/v1/lf-runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tag_id: selectedTagId, labeling_function_ids: selectedLfIds }),
       });
-      const run = (await res.json()) as LfRun;
       if (!res.ok) {
-        setError("Run failed to start");
+        let detail = `Run failed (HTTP ${res.status})`;
+        try {
+          const body = (await res.json()) as { detail?: string | { msg: string }[] };
+          if (typeof body.detail === "string") {
+            detail = body.detail;
+          } else if (Array.isArray(body.detail) && body.detail.length > 0) {
+            detail = body.detail.map((e) => e.msg).join("; ");
+          }
+        } catch {
+          /* non-JSON error body — keep the default message */
+        }
+        setError(detail);
         return;
       }
+      const run = (await res.json()) as LfRun;
       setLastRun(run);
       setMessage(`Run ${run.id} — ${run.status}`);
       if (run.status === "completed") {
@@ -389,6 +407,8 @@ export default function StudioPage() {
       }
     } catch (e) {
       setError(describeMlFetchError(e));
+    } finally {
+      setBatchRunning(false);
     }
   };
 
@@ -538,63 +558,79 @@ export default function StudioPage() {
               {suggestionsLoading ? "Loading..." : "Refresh suggestions"}
             </button>
           </div>
-          <div className="space-y-2">
-            {visibleSuggestions.map((s) => {
-              const isAdding = adding.has(s.keyword);
-              return (
+          <div className="grid gap-4 lg:grid-cols-2">
+            {(
+              [
+                { label: "Positive hinters (+1)", list: visiblePositive, isPositive: true },
+                { label: "Negative hinters (−1)", list: visibleNegative, isPositive: false },
+              ] as const
+            ).map(({ label, list, isPositive }) => (
+              <div key={label} className="space-y-2">
                 <div
-                  key={s.keyword}
-                  className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-ink-900 bg-ink-950/40 px-3 py-2 text-xs"
+                  className={`text-[11px] font-semibold uppercase tracking-wide ${isPositive ? "text-emerald-400" : "text-rose-400"}`}
                 >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-sm text-white">{s.keyword}</span>
-                    <span
-                      className="rounded bg-emerald-900/40 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
-                      title="Distinct gold-positive documents containing this token"
-                    >
-                      +{s.positive_hits}
-                    </span>
-                    <span
-                      className="rounded bg-rose-900/40 px-2 py-0.5 text-[10px] font-medium text-rose-300"
-                      title="Distinct gold-negative documents containing this token"
-                    >
-                      -{s.negative_hits}
-                    </span>
-                    <span
-                      className="rounded bg-ink-900 px-2 py-0.5 text-[10px] uppercase tracking-wide text-ink-500"
-                      title="Heuristic ranking score; higher is more confident"
-                    >
-                      score {s.score.toFixed(2)}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="rounded-md bg-accent-600 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-accent-500 disabled:opacity-50"
-                      onClick={() => void addSuggestion(s)}
-                      disabled={isAdding}
-                    >
-                      {isAdding ? "Adding..." : "Add as LF"}
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-md border border-ink-700 px-2 py-1 text-[11px] text-ink-200 hover:border-accent-500"
-                      onClick={() => dismissSuggestion(s.keyword)}
-                      disabled={isAdding}
-                    >
-                      Dismiss
-                    </button>
-                  </div>
+                  {label}
                 </div>
-              );
-            })}
-            {!visibleSuggestions.length && !suggestionsLoading ? (
-              <div className="text-xs text-ink-500">
-                {dismissed.size
-                  ? `No more keyword suggestions for this tag (${dismissed.size} dismissed). Add gold labels to surface new candidates.`
-                  : "No new keyword suggestions - everything we found is already covered by an existing LF."}
+                {list.map((s) => {
+                  const isAdding = adding.has(s.keyword);
+                  return (
+                    <div
+                      key={s.keyword}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-ink-900 bg-ink-950/40 px-3 py-2 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-sm text-white">{s.keyword}</span>
+                        <span
+                          className="rounded bg-emerald-900/40 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
+                          title="Distinct gold-positive documents containing this token"
+                        >
+                          +{s.positive_hits}
+                        </span>
+                        <span
+                          className="rounded bg-rose-900/40 px-2 py-0.5 text-[10px] font-medium text-rose-300"
+                          title="Distinct gold-negative documents containing this token"
+                        >
+                          −{s.negative_hits}
+                        </span>
+                        <span
+                          className="rounded bg-ink-900 px-2 py-0.5 text-[10px] uppercase tracking-wide text-ink-500"
+                          title="Heuristic ranking score; higher is more confident"
+                        >
+                          score {s.score.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className={`rounded-md px-3 py-1.5 text-[11px] font-medium text-white disabled:opacity-50 ${isPositive ? "bg-accent-600 hover:bg-accent-500" : "bg-rose-700 hover:bg-rose-600"}`}
+                          onClick={() => void addSuggestion(s)}
+                          disabled={isAdding}
+                        >
+                          {isAdding ? "Adding..." : "Add as LF"}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-md border border-ink-700 px-2 py-1 text-[11px] text-ink-200 hover:border-accent-500"
+                          onClick={() => dismissSuggestion(s.keyword)}
+                          disabled={isAdding}
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {!list.length && !suggestionsLoading ? (
+                  <div className="text-xs text-ink-500">
+                    {dismissed.size
+                      ? "No more candidates (some dismissed). Add gold labels to surface new ones."
+                      : isPositive
+                        ? "No positive candidates — label some +1 documents to seed these."
+                        : "No negative candidates — label some −1 documents to seed these."}
+                  </div>
+                ) : null}
               </div>
-            ) : null}
+            ))}
           </div>
         </section>
       ) : null}
@@ -734,8 +770,9 @@ export default function StudioPage() {
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
-            className="rounded-md bg-accent-600 px-3 py-2 text-sm font-medium text-white hover:bg-accent-500"
+            className="rounded-md bg-accent-600 px-3 py-2 text-sm font-medium text-white hover:bg-accent-500 disabled:opacity-50"
             onClick={() => void runBatch()}
+            disabled={batchRunning}
           >
             Run batch + export matrix
           </button>
@@ -748,12 +785,18 @@ export default function StudioPage() {
               Reload matrix JSON
             </button>
           ) : null}
+          {batchRunning ? (
+            <span className="text-xs text-ink-400">Running…</span>
+          ) : lastRun ? (
+            <span className={`text-xs ${lastRun.status === "completed" ? "text-emerald-400" : lastRun.status === "failed" ? "text-red-400" : "text-ink-400"}`}>
+              {lastRun.status === "completed"
+                ? `Completed — ${lastRun.documents_scanned} docs, ${lastRun.votes_written} votes`
+                : lastRun.status === "failed"
+                  ? `Failed: ${lastRun.error ?? "unknown error"}`
+                  : lastRun.status}
+            </span>
+          ) : null}
         </div>
-        {lastRun ? (
-          <pre className="max-h-40 overflow-auto rounded-md border border-ink-900 bg-black/40 p-3 text-[11px] text-ink-200">
-            {JSON.stringify(lastRun, null, 2)}
-          </pre>
-        ) : null}
       </section>
 
       <section className="grid gap-6 lg:grid-cols-2">

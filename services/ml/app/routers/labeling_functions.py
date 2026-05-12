@@ -72,6 +72,7 @@ def suggest_labeling_functions(
             {
                 "keyword": s.keyword,
                 "score": s.score,
+                "return_value": s.return_value,
                 "positive_hits": s.positive_hits,
                 "negative_hits": s.negative_hits,
                 "example_document_ids": s.example_document_ids,

@@ -720,6 +720,7 @@ export default function ExplorePage() {
       ) : null}
 
       <section className="overflow-hidden rounded-lg border border-ink-900">
+        <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-ink-900 text-left text-sm">
           <thead className="bg-ink-900/50 text-xs uppercase tracking-wide text-ink-500">
             <tr>
@@ -812,6 +813,7 @@ export default function ExplorePage() {
             ) : null}
           </tbody>
         </table>
+        </div>
         {total > 0 ? (
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-ink-900 px-3 py-2 text-xs text-ink-400">
             <span>

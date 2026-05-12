@@ -15,6 +15,9 @@ from app.project_scope import resolve_project_id
 
 router = APIRouter(prefix="/v1/lf-runs", tags=["lfRuns"])
 
+# Flush votes to DB after this many documents to bound peak memory usage.
+_VOTE_FLUSH_BATCH = 500
+
 
 @router.post("", status_code=202)
 def create_lf_run(payload: dict, db: Annotated[Session, Depends(get_db)]):
@@ -51,36 +54,65 @@ def create_lf_run(payload: dict, db: Annotated[Session, Depends(get_db)]):
 
     for pos, lf in enumerate(lf_rows):
         db.add(LfRunLabelingFunction(run_id=run.id, labeling_function_id=lf.id, position=pos))
+    db.flush()
 
-    docs = list(
-        db.scalars(
-            select(Document)
-            .where(Document.project_id == tag.project_id)
-            .order_by(Document.created_at.asc())
-        )
+    # Extract everything we need from ORM objects into plain Python values so
+    # that the execution loop below never touches the SQLAlchemy identity map
+    # and we can safely expunge between batches without DetachedInstanceError.
+    run_id = run.id
+    project_id = run.project_id
+    lf_specs = [
+        {"id": lf.id, "name": lf.name, "type": lf.type, "config": dict(lf.config or {})}
+        for lf in lf_rows
+    ]
+    lf_ids_for_result = [lf.id for lf in lf_rows]
+
+    # Select only the columns we need so results are plain Row objects that
+    # never enter the ORM identity map — safe to iterate while flushing votes.
+    doc_stmt = (
+        select(Document.id, Document.text)
+        .where(Document.project_id == tag.project_id)
+        .order_by(Document.created_at.asc())
     )
-    votes: list[LfRunVote] = []
+
+    pending_votes: list[LfRunVote] = []
+    total_votes = 0
     scanned = 0
     fatal: str | None = None
 
-    for doc in docs:
+    for row in db.execute(doc_stmt):
+        doc_id: str = row.id
+        doc_text: str = row.text
         scanned += 1
-        for lf in lf_rows:
+        for spec in lf_specs:
             try:
-                vote = execute_labeling_function(lf.type, dict(lf.config or {}), doc.text)
+                vote = execute_labeling_function(spec["type"], spec["config"], doc_text)
             except LfConfigError as exc:
                 fatal = str(exc)
                 break
-            votes.append(
+            except Exception as exc:  # noqa: BLE001
+                fatal = f"unexpected error in LF '{spec['name']}': {type(exc).__name__}: {exc}"
+                break
+            pending_votes.append(
                 LfRunVote(
-                    run_id=run.id,
-                    document_id=doc.id,
-                    labeling_function_id=lf.id,
+                    run_id=run_id,
+                    document_id=doc_id,
+                    labeling_function_id=spec["id"],
                     vote=int(vote),
                 )
             )
         if fatal:
             break
+
+        # Flush votes periodically and evict them from the identity map so
+        # SQLAlchemy doesn't accumulate millions of ORM objects in memory.
+        if len(pending_votes) >= _VOTE_FLUSH_BATCH:
+            db.add_all(pending_votes)
+            db.flush()
+            for v in pending_votes:
+                db.expunge(v)
+            total_votes += len(pending_votes)
+            pending_votes = []
 
     if fatal:
         run.status = "failed"
@@ -88,25 +120,36 @@ def create_lf_run(payload: dict, db: Annotated[Session, Depends(get_db)]):
         run.documents_scanned = scanned
         run.completed_at = datetime.utcnow()
         db.commit()
-        db.refresh(run)
-        return _serialize_run(run, [lf.id for lf in lf_rows])
+        return _serialize_run(run, lf_ids_for_result)
 
-    db.add_all(votes)
+    # Flush the final batch.
+    if pending_votes:
+        db.add_all(pending_votes)
+        db.flush()
+        total_votes += len(pending_votes)
+
     run.status = "completed"
     run.documents_scanned = scanned
-    run.votes_written = len(votes)
+    run.votes_written = total_votes
     run.completed_at = datetime.utcnow()
     # Flush so the aggregator can read the votes back via the session.
     db.flush()
-    write_probabilistic_labels_for_run(
-        db,
-        project_id=run.project_id,
-        tag_id=run.tag_id,
-        run_id=run.id,
-    )
+    try:
+        write_probabilistic_labels_for_run(
+            db,
+            project_id=project_id,
+            tag_id=tag_id,
+            run_id=run_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        run.status = "failed"
+        run.error = f"aggregation error: {type(exc).__name__}: {exc}"
+        db.commit()
+        db.refresh(run)
+        return _serialize_run(run, lf_ids_for_result)
     db.commit()
     db.refresh(run)
-    return _serialize_run(run, [lf.id for lf in lf_rows])
+    return _serialize_run(run, lf_ids_for_result)
 
 
 @router.get("")
