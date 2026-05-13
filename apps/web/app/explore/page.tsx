@@ -454,33 +454,55 @@ export default function ExplorePage() {
 
       <section className="rounded-lg border border-ink-900 bg-ink-900/30 p-4">
         <div className="text-sm font-medium text-white">Ingest</div>
-        <p className="mt-1 text-xs text-ink-500">
-          For CSV, set <span className="text-ink-200">Text column</span> to the header that holds each document&apos;s
-          body (match is case-insensitive). Any other columns are stored as JSON metadata. JSON uploads ignore these
-          fields.
-        </p>
-        <div className="mt-3 grid max-w-xl gap-3 sm:grid-cols-2">
-          <label className="block text-xs text-ink-500">
-            Text column (CSV header)
-            <input
-              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-2 py-1.5 font-mono text-sm text-white outline-none ring-accent-500 focus:ring-2"
-              value={csvTextColumn}
-              onChange={(e) => setCsvTextColumn(e.target.value)}
-              placeholder="text"
-              spellCheck={false}
-            />
-          </label>
-          <label className="block text-xs text-ink-500">
-            Id column (optional)
-            <input
-              className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-2 py-1.5 font-mono text-sm text-white outline-none ring-accent-500 focus:ring-2"
-              value={csvIdColumn}
-              onChange={(e) => setCsvIdColumn(e.target.value)}
-              placeholder="e.g. id or file"
-              spellCheck={false}
-            />
-          </label>
-        </div>
+
+        {pendingFile && pendingFile.name.toLowerCase().endsWith(".json") ? (
+          <div className="mt-2 space-y-2">
+            <p className="text-xs text-ink-500">
+              JSON files must be an <span className="text-ink-200">array of objects</span> (or{" "}
+              <span className="font-mono text-ink-200">{`{"documents": [...]}`}</span>). Each object
+              must have a <span className="font-mono text-ink-200">"text"</span> key containing the
+              document body. An optional <span className="font-mono text-ink-200">"id"</span> key
+              sets a stable ID; all other keys are stored as metadata.
+            </p>
+            <pre className="overflow-x-auto rounded-md border border-ink-800 bg-ink-950 p-3 text-[11px] leading-relaxed text-ink-300">
+{`[
+  { "id": "doc-1", "text": "Invoice #42 for consulting services.", "source": "email" },
+  { "id": "doc-2", "text": "Your receipt is attached.", "source": "web" }
+]`}
+            </pre>
+          </div>
+        ) : (
+          <>
+            <p className="mt-1 text-xs text-ink-500">
+              For CSV, set <span className="text-ink-200">Text column</span> to the header that
+              holds each document&apos;s body (match is case-insensitive). Any other columns are
+              stored as JSON metadata.
+            </p>
+            <div className="mt-3 grid max-w-xl gap-3 sm:grid-cols-2">
+              <label className="block text-xs text-ink-500">
+                Text column (CSV header)
+                <input
+                  className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-2 py-1.5 font-mono text-sm text-white outline-none ring-accent-500 focus:ring-2"
+                  value={csvTextColumn}
+                  onChange={(e) => setCsvTextColumn(e.target.value)}
+                  placeholder="text"
+                  spellCheck={false}
+                />
+              </label>
+              <label className="block text-xs text-ink-500">
+                Id column (optional)
+                <input
+                  className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950 px-2 py-1.5 font-mono text-sm text-white outline-none ring-accent-500 focus:ring-2"
+                  value={csvIdColumn}
+                  onChange={(e) => setCsvIdColumn(e.target.value)}
+                  placeholder="e.g. id or file"
+                  spellCheck={false}
+                />
+              </label>
+            </div>
+          </>
+        )}
+
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <input
             className="block w-full max-w-md text-sm text-ink-200 file:mr-4 file:rounded-md file:border-0 file:bg-accent-600 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-accent-500"
