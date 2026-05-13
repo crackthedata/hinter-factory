@@ -109,7 +109,16 @@ That runs `openapi-typescript` in `@hinter/contracts` and overwrites `packages/c
   - **Any project can be deleted.** `DELETE /v1/projects/{id}` cascades to every row in the workspace. Use with care.
   - **Tag uniqueness is per-project.** The same tag name may exist in multiple projects.
 - **Explore:** CSV/JSON ingest, full-text search, length buckets (short / medium / long), facets on top-level JSON metadata keys, manual gold labeling, and an expandable text view for long documents.
-  - **Ingest UX.** Pick a file, then click **Upload** — uploading is a separate step from picking a file, so you can edit the **Text column** / **Id column** before submitting and retry without re-picking the file. CSV: set **Text column** to the header that holds each document's body (case-insensitive match; default `text`); optionally set **Id column** for stable row ids; all other headers become JSON metadata.
+  - **Ingest UX.** Pick a file, then click **Upload** — uploading is a separate step from picking a file, so you can edit settings before submitting and retry without re-picking the file. Both CSV and JSON are accepted.
+    - **CSV:** set **Text column** to the header that holds each document's body (case-insensitive match; default `text`); optionally set **Id column** for stable row ids; all other headers become JSON metadata.
+    - **JSON:** upload a `.json` file containing either an array of objects or `{"documents": [...]}`. Each object must have a `"text"` key for the document body; an optional `"id"` key sets a stable ID; all other keys are stored as metadata. Example:
+      ```json
+      [
+        { "id": "doc-1", "text": "Invoice #42 for consulting services.", "source": "email" },
+        { "id": "doc-2", "text": "Your receipt is attached.", "source": "web" }
+      ]
+      ```
+      The Ingest panel shows a format reminder and hides the CSV-only fields whenever a `.json` file is selected.
   - **Reading long documents.** Each result row truncates to ~220 characters. Click **Show full** on a row to expand it (displayed with preserved whitespace), or **Expand all** above the table to expand every row on the page.
   - **Manual gold labels.** After you create tags in LF Studio, pick a tag at the bottom of the Explore filters and vote **+1** (positive for tag), **0** (abstain / unsure), or **−1** (negative) per document. Labels apply to the documents shown on the current page (default limit 50). The same `+1 / 0 / −1` semantics apply to LF votes.
 - **LF Studio:** Author regex, keyword, and structural labeling functions; preview votes on sample rows; run a batch over the corpus; export a sparse label matrix from a completed run.
