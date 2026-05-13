@@ -16,6 +16,7 @@ type ProbabilisticLabelListResponse =
 type ProbabilityDistributionResponse =
   components["schemas"]["ProbabilityDistributionResponse"];
 
+type LfVote = -1 | 0 | 1;
 type SortOption = "probability_desc" | "probability_asc" | "entropy_desc";
 type PredictedFilter = "" | "positive" | "negative" | "abstain";
 
@@ -57,6 +58,8 @@ export default function PredictionsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [goldByDocId, setGoldByDocId] = useState<Record<string, LfVote>>({});
+  const [goldSavingId, setGoldSavingId] = useState<string | null>(null);
 
   useEffect(() => {
     setTagId("");
@@ -160,6 +163,59 @@ export default function PredictionsPage() {
       else next.add(id);
       return next;
     });
+  };
+
+  // Load gold labels for the visible page whenever the tag or page data changes.
+  // Only active when a specific tag is selected — "all tags" view has no single tag_id to label against.
+  useEffect(() => {
+    if (!tagId || !data?.items.length) {
+      setGoldByDocId({});
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const sp = new URLSearchParams();
+        sp.set("tag_id", tagId);
+        for (const r of data.items) sp.append("document_ids", r.document_id);
+        const res = await mlFetch(`/api/ml/v1/gold-labels?${sp.toString()}`);
+        if (!res.ok || cancelled) return;
+        const list = (await res.json()) as Array<{ document_id: string; value: number }>;
+        if (cancelled) return;
+        const next: Record<string, LfVote> = {};
+        for (const g of list) next[g.document_id] = g.value as LfVote;
+        setGoldByDocId(next);
+      } catch {
+        /* gold labels are best-effort; fall back to showing no active label */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tagId, data]);
+
+  const setGoldVote = async (documentId: string, value: LfVote) => {
+    if (!tagId) return;
+    const prev = goldByDocId[documentId];
+    setGoldByDocId((m) => ({ ...m, [documentId]: value }));
+    setGoldSavingId(documentId);
+    try {
+      const res = await mlFetch("/api/ml/v1/gold-labels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: documentId, tag_id: tagId, value }),
+      });
+      if (!res.ok) throw new Error("save failed");
+    } catch {
+      setGoldByDocId((m) => {
+        const next = { ...m };
+        if (prev === undefined) delete next[documentId];
+        else next[documentId] = prev;
+        return next;
+      });
+    } finally {
+      setGoldSavingId(null);
+    }
   };
 
   if (!hasActiveProject) {
@@ -345,6 +401,10 @@ export default function PredictionsPage() {
               row={row}
               expanded={expanded.has(row.document_id)}
               onToggle={() => toggleExpanded(row.document_id)}
+              canLabel={!!tagId}
+              currentGold={goldByDocId[row.document_id]}
+              onGoldVote={setGoldVote}
+              goldSaving={goldSavingId === row.document_id}
             />
           ))}
           {!loading && items.length === 0 ? (
@@ -384,10 +444,18 @@ function PredictionRow({
   row,
   expanded,
   onToggle,
+  canLabel,
+  currentGold,
+  onGoldVote,
+  goldSaving,
 }: {
   row: ProbabilisticLabelRow;
   expanded: boolean;
   onToggle: () => void;
+  canLabel: boolean;
+  currentGold: LfVote | undefined;
+  onGoldVote: (docId: string, value: LfVote) => void;
+  goldSaving: boolean;
 }) {
   const tone = predictedTone(row.predicted);
   const probPct = Math.round(row.probability * 100);
@@ -425,11 +493,21 @@ function PredictionRow({
 
   const displayText = expanded && fullText !== null ? fullText : row.text_preview;
 
+  const goldTone =
+    currentGold === 1 ? "emerald" : currentGold === -1 ? "red" : "neutral";
+
   return (
     <div className={`rounded-md border ${borderColor} bg-ink-900/30 p-3`}>
       <div className="flex flex-wrap items-center gap-3 text-xs">
         <span className="font-mono text-ink-500">{row.document_id.slice(0, 8)}…</span>
         <Badge label="pred" value={predictedLabel(row.predicted)} tone={tone} />
+        {canLabel && currentGold !== undefined ? (
+          <Badge
+            label="gold"
+            value={currentGold === 1 ? "+1" : currentGold === 0 ? "0" : "−1"}
+            tone={goldTone}
+          />
+        ) : null}
         <span className="text-ink-500">
           P = <span className="font-mono text-ink-200">{formatProbability(row.probability)}</span>
         </span>
@@ -451,6 +529,26 @@ function PredictionRow({
             entropy{" "}
             <span className="font-mono text-ink-200">{formatNumber(row.entropy, 2)}</span>
           </span>
+        ) : null}
+        {canLabel ? (
+          <div className="flex items-center gap-1" title="Assign a gold label to confirm or correct this prediction">
+            <span className="text-ink-500">gold</span>
+            {([1, 0, -1] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                disabled={goldSaving}
+                onClick={() => onGoldVote(row.document_id, v)}
+                className={`rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors disabled:opacity-40 ${
+                  currentGold === v
+                    ? "bg-accent-600 text-white"
+                    : "border border-ink-600 bg-ink-950 text-ink-200 hover:border-accent-500"
+                }`}
+              >
+                {v === 1 ? "+1" : v === 0 ? "0" : "−1"}
+              </button>
+            ))}
+          </div>
         ) : null}
         <button
           type="button"

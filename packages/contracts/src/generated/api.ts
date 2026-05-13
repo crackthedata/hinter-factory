@@ -613,11 +613,16 @@ export interface components {
              * @description Heuristic ranking score; higher is more confident.
              */
             score: number;
+            /**
+             * @description Suggested vote direction. `1` = positive hinter (keyword appears more in gold-positive documents). `-1` = negative hinter (keyword appears more in gold-negative documents).
+             * @enum {integer}
+             */
+            return_value: 1 | -1;
             /** @description Distinct gold-positive documents containing the token. */
             positive_hits: number;
             /** @description Distinct gold-negative documents containing the token. */
             negative_hits: number;
-            /** @description Up to a few document ids that contain the token. */
+            /** @description Up to a few document ids that contain the token (from the dominant-class docs). */
             example_document_ids: string[];
         };
         /**

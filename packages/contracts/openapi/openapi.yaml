@@ -1055,7 +1055,7 @@ components:
             $ref: "#/components/schemas/LabelingFunctionPreviewRow"
     HinterSuggestion:
       type: object
-      required: [keyword, score, positive_hits, negative_hits, example_document_ids]
+      required: [keyword, score, return_value, positive_hits, negative_hits, example_document_ids]
       properties:
         keyword:
           type: string
@@ -1064,6 +1064,13 @@ components:
           type: number
           format: float
           description: Heuristic ranking score; higher is more confident.
+        return_value:
+          type: integer
+          enum: [1, -1]
+          description: >-
+            Suggested vote direction. `1` = positive hinter (keyword appears more
+            in gold-positive documents). `-1` = negative hinter (keyword appears
+            more in gold-negative documents).
         positive_hits:
           type: integer
           description: Distinct gold-positive documents containing the token.
@@ -1073,7 +1080,7 @@ components:
         example_document_ids:
           type: array
           items: { type: string }
-          description: Up to a few document ids that contain the token.
+          description: Up to a few document ids that contain the token (from the dominant-class docs).
     HinterSuggestionsBasis:
       type: string
       enum: [gold, tag_name, mixed]

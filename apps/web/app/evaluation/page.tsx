@@ -56,6 +56,23 @@ type EvaluationSummary = {
   recall: number | null;
   f1: number | null;
   coverage: number | null;
+  corpus_total_docs: number;
+  corpus_covered_docs: number;
+  corpus_coverage: number | null;
+};
+
+type LfStats = {
+  labeling_function_id: string;
+  labeling_function_name: string;
+  lf_type: string;
+  return_value: number;
+  true_positive: number;
+  false_positive: number;
+  true_negative: number;
+  false_negative: number;
+  abstain_on_positive: number;
+  abstain_on_negative: number;
+  precision: number | null;
 };
 
 type EvaluationResponse = {
@@ -64,6 +81,7 @@ type EvaluationResponse = {
   run_completed_at?: string | null;
   summary: EvaluationSummary;
   rows: EvaluationRow[];
+  lf_stats?: LfStats[];
   truncated?: boolean;
   message?: string;
 };
@@ -133,13 +151,23 @@ export default function EvaluationPage() {
   const [visibleCategories, setVisibleCategories] = useState<Set<EvaluationCategory>>(
     () => new Set(["false_negative", "false_positive", "abstain_on_positive"]),
   );
+  const [goldOverrides, setGoldOverrides] = useState<Record<string, LfVote>>({});
+  const [goldSavingId, setGoldSavingId] = useState<string | null>(null);
+  const [resultsStale, setResultsStale] = useState(false);
 
   useEffect(() => {
     setTagId("");
     setRunId("");
     setRuns([]);
     setData(null);
+    setGoldOverrides({});
+    setResultsStale(false);
   }, [projectId]);
+
+  useEffect(() => {
+    setGoldOverrides({});
+    setResultsStale(false);
+  }, [tagId, runId]);
 
   useEffect(() => {
     if (!projectId) {
@@ -208,6 +236,8 @@ export default function EvaluationPage() {
       } else {
         const body = (await res.json()) as EvaluationResponse;
         setData(body);
+        setGoldOverrides({});
+        setResultsStale(false);
       }
     } catch (e) {
       setError(describeMlFetchError(e));
@@ -231,6 +261,12 @@ export default function EvaluationPage() {
     }
     return map;
   }, [allRows]);
+
+  const allTextsExpanded =
+    allRows.length > 0 && allRows.every((r) => expandedTexts.has(r.document_id));
+  const setAllTextsExpanded = (expand: boolean) => {
+    setExpandedTexts(expand ? new Set(allRows.map((r) => r.document_id)) : new Set());
+  };
 
   const toggleDoc = (id: string) => {
     setExpandedDocs((prev) => {
@@ -257,6 +293,31 @@ export default function EvaluationPage() {
       else next.add(cat);
       return next;
     });
+  };
+
+  const setGoldVote = async (documentId: string, value: LfVote) => {
+    if (!tagId) return;
+    const prevFromApi = allRows.find((r) => r.document_id === documentId)?.gold ?? null;
+    setGoldOverrides((m) => ({ ...m, [documentId]: value }));
+    setGoldSavingId(documentId);
+    try {
+      const res = await mlFetch("/api/ml/v1/gold-labels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ document_id: documentId, tag_id: tagId, value }),
+      });
+      if (!res.ok) throw new Error("save failed");
+      setResultsStale(true);
+    } catch {
+      setGoldOverrides((m) => {
+        const next = { ...m };
+        if (prevFromApi === null) delete next[documentId];
+        else next[documentId] = prevFromApi;
+        return next;
+      });
+    } finally {
+      setGoldSavingId(null);
+    }
   };
 
   const selectedRunInfo = useMemo(() => {
@@ -354,11 +415,20 @@ export default function EvaluationPage() {
 
       {summary ? (
         <section className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-5">
             <Metric label="Precision" value={formatPercent(summary.precision)} hint="TP / (TP + FP)" />
             <Metric label="Recall" value={formatPercent(summary.recall)} hint="TP / (TP + FN + abstains on positives)" />
             <Metric label="F1" value={formatPercent(summary.f1)} hint="Harmonic mean of P and R" />
-            <Metric label="Coverage" value={formatPercent(summary.coverage)} hint="Non-abstain predictions / validation set" />
+            <Metric label="Coverage (gold)" value={formatPercent(summary.coverage)} hint="Non-abstain predictions / validation set" />
+            <Metric
+              label="Corpus coverage"
+              value={formatPercent(summary.corpus_coverage)}
+              hint={
+                summary.corpus_total_docs > 0
+                  ? `${summary.corpus_covered_docs.toLocaleString()} / ${summary.corpus_total_docs.toLocaleString()} docs voted on`
+                  : "No documents in corpus"
+              }
+            />
           </div>
           <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
             <Counter label="Validation set" value={summary.considered} sub={`${summary.total_gold} gold rows total`} />
@@ -389,6 +459,16 @@ export default function EvaluationPage() {
         </div>
       ) : null}
 
+      {resultsStale ? (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          Gold labels updated — click <strong>Refresh</strong> to recalculate categories and metrics.
+        </div>
+      ) : null}
+
+      {data?.lf_stats && data.lf_stats.length > 0 ? (
+        <LfStatsTable stats={data.lf_stats} />
+      ) : null}
+
       {summary && summary.considered > 0 ? (
         <section className="space-y-4">
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -411,6 +491,14 @@ export default function EvaluationPage() {
                 </button>
               );
             })}
+            <span className="text-ink-700">|</span>
+            <button
+              type="button"
+              onClick={() => setAllTextsExpanded(!allTextsExpanded)}
+              className="ml-auto rounded border border-ink-700 bg-ink-950 px-2 py-1 text-ink-200 hover:border-accent-500"
+            >
+              {allTextsExpanded ? "Collapse all" : "Expand all"}
+            </button>
           </div>
 
           {data?.truncated ? (
@@ -439,6 +527,9 @@ export default function EvaluationPage() {
                         onToggle={() => toggleDoc(r.document_id)}
                         textExpanded={expandedTexts.has(r.document_id)}
                         onToggleText={() => toggleText(r.document_id)}
+                        currentGold={goldOverrides[r.document_id] ?? r.gold}
+                        onGoldVote={setGoldVote}
+                        goldSaving={goldSavingId === r.document_id}
                       />
                     ))}
                   </div>
@@ -496,19 +587,42 @@ function ErrorRow({
   onToggle,
   textExpanded,
   onToggleText,
+  currentGold,
+  onGoldVote,
+  goldSaving,
 }: {
   row: EvaluationRow;
   expanded: boolean;
   onToggle: () => void;
   textExpanded: boolean;
   onToggleText: () => void;
+  currentGold: LfVote;
+  onGoldVote: (docId: string, value: LfVote) => void;
+  goldSaving: boolean;
 }) {
   const color = CATEGORY_COLOR[row.category];
   return (
     <div className={`rounded-md border ${color} p-3`}>
       <div className="flex flex-wrap items-center gap-3 text-xs">
         <span className="font-mono text-ink-500">{row.document_id.slice(0, 8)}…</span>
-        <Badge label="gold" value={formatVote(row.gold)} tone={row.gold === 1 ? "emerald" : row.gold === -1 ? "red" : "neutral"} />
+        <div className="flex items-center gap-1" title="Assign or correct the gold label for this document">
+          <span className="text-ink-500">gold</span>
+          {([1, 0, -1] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              disabled={goldSaving}
+              onClick={() => onGoldVote(row.document_id, v)}
+              className={`rounded px-1.5 py-0.5 font-mono text-[11px] font-medium transition-colors disabled:opacity-40 ${
+                currentGold === v
+                  ? "bg-accent-600 text-white"
+                  : "border border-ink-600 bg-ink-950 text-ink-200 hover:border-accent-500"
+              }`}
+            >
+              {v === 1 ? "+1" : v === 0 ? "0" : "−1"}
+            </button>
+          ))}
+        </div>
         <Badge
           label="pred"
           value={formatVote(row.predicted)}
@@ -586,6 +700,100 @@ function DocumentText({
         </button>
       ) : null}
     </div>
+  );
+}
+
+function LfStatsTable({ stats }: { stats: LfStats[] }) {
+  const sorted = [...stats].sort((a, b) => {
+    const aFired = a.true_positive + a.false_positive + a.true_negative + a.false_negative;
+    const bFired = b.true_positive + b.false_positive + b.true_negative + b.false_negative;
+    return bFired - aFired;
+  });
+
+  return (
+    <section className="space-y-2">
+      <h2 className="text-sm font-semibold text-white">Per-hinter accuracy</h2>
+      <p className="text-xs text-ink-500">
+        Each row counts that hinter&apos;s own votes against your gold-labeled documents — not the aggregate
+        prediction. A −1 hinter can show high <span className="text-red-400">Conflict</span> (it voted −1
+        on gold-positive docs) while the summary FN stays low, because other +1 hinters outvoted it.
+        Abstains are expected: a hinter that doesn&apos;t match simply doesn&apos;t vote.
+      </p>
+      <div className="overflow-x-auto rounded-md border border-ink-800">
+        <table className="w-full text-left text-xs">
+          <thead className="border-b border-ink-800 text-[11px] uppercase tracking-wide text-ink-500">
+            <tr>
+              <th className="px-3 py-2">Hinter</th>
+              <th className="px-3 py-2">Type</th>
+              <th className="px-3 py-2">Dir</th>
+              <th className="px-3 py-2 text-emerald-400" title="Voted +1 on a gold-positive document">TP</th>
+              <th className="px-3 py-2 text-amber-400" title="Voted +1 on a gold-negative document">FP</th>
+              <th className="px-3 py-2 text-emerald-400" title="Voted −1 on a gold-negative document">TN</th>
+              <th className="px-3 py-2 text-red-400" title="Voted −1 on a gold-positive document (conflicting vote — differs from summary FN which counts the aggregate prediction)">Conflict</th>
+              <th className="px-3 py-2 text-ink-500" title="Abstained on a gold-positive document (did not fire)">Abs+</th>
+              <th className="px-3 py-2 text-ink-500" title="Abstained on a gold-negative document (did not fire)">Abs−</th>
+              <th className="px-3 py-2">Precision</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((s) => {
+              const fired = s.true_positive + s.false_positive + s.true_negative + s.false_negative;
+              const correct = s.true_positive + s.true_negative;
+              const hasFp = s.false_positive > 0;
+              const hasFn = s.false_negative > 0;
+              const precisionStr = s.precision !== null ? `${(s.precision * 100).toFixed(0)}%` : "—";
+              const precisionColor =
+                s.precision === null
+                  ? "text-ink-500"
+                  : s.precision >= 0.9
+                    ? "text-emerald-400"
+                    : s.precision >= 0.7
+                      ? "text-amber-400"
+                      : "text-red-400";
+              return (
+                <tr
+                  key={s.labeling_function_id}
+                  className={`border-t border-ink-900 ${fired === 0 ? "opacity-50" : ""}`}
+                >
+                  <td className="px-3 py-2 font-medium text-ink-200">{s.labeling_function_name}</td>
+                  <td className="px-3 py-2 font-mono text-ink-500">{s.lf_type}</td>
+                  <td className="px-3 py-2 font-mono">
+                    <span className={s.return_value === 1 ? "text-emerald-400" : "text-red-400"}>
+                      {s.return_value === 1 ? "+1" : "−1"}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 font-mono text-emerald-400">{s.true_positive}</td>
+                  <td className={`px-3 py-2 font-mono ${hasFp ? "text-amber-400" : "text-ink-600"}`}>
+                    {s.false_positive}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-emerald-400">{s.true_negative}</td>
+                  <td
+                    className={`px-3 py-2 font-mono ${hasFn ? "text-red-400" : "text-ink-600"}`}
+                    title={hasFn ? `This hinter voted −1 on ${s.false_negative} gold-positive document${s.false_negative === 1 ? "" : "s"} (conflicting votes, not aggregate FNs)` : undefined}
+                  >
+                    {s.false_negative}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-ink-500">{s.abstain_on_positive}</td>
+                  <td className="px-3 py-2 font-mono text-ink-500">{s.abstain_on_negative}</td>
+                  <td className={`px-3 py-2 font-mono font-medium ${precisionColor}`}>
+                    {fired === 0 ? (
+                      <span className="text-ink-600">never fired</span>
+                    ) : (
+                      <>
+                        {precisionStr}
+                        <span className="ml-1 text-ink-600">
+                          ({correct}/{fired})
+                        </span>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 

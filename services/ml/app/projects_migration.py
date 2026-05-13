@@ -26,6 +26,7 @@ def migrate(engine: Engine) -> None:
             return
         _add_project_id_columns(conn, inspector)
         _migrate_tags_unique_constraint(conn, inspector)
+        _add_probabilistic_label_vote_columns(conn, inspector)
         _warn_on_orphan_rows(conn)
 
 
@@ -101,6 +102,16 @@ def _migrate_tags_unique_constraint(conn, inspector) -> None:
         conn.execute(text("CREATE INDEX ix_tags_project_id ON tags(project_id)"))
     finally:
         conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+
+def _add_probabilistic_label_vote_columns(conn, inspector) -> None:
+    if "probabilistic_labels" not in inspector.get_table_names():
+        return
+    columns = {c["name"] for c in inspector.get_columns("probabilistic_labels")}
+    if "positive_votes" not in columns:
+        conn.execute(text("ALTER TABLE probabilistic_labels ADD COLUMN positive_votes INTEGER NOT NULL DEFAULT 0"))
+    if "negative_votes" not in columns:
+        conn.execute(text("ALTER TABLE probabilistic_labels ADD COLUMN negative_votes INTEGER NOT NULL DEFAULT 0"))
 
 
 def _warn_on_orphan_rows(conn) -> None:

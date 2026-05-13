@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -58,6 +58,21 @@ def categorize(gold: int, predicted: int) -> Category:
 
 
 @dataclass
+class LfStats:
+    labeling_function_id: str
+    labeling_function_name: str
+    lf_type: str
+    return_value: int
+    true_positive: int
+    false_positive: int
+    true_negative: int
+    false_negative: int
+    abstain_on_positive: int
+    abstain_on_negative: int
+    precision: float | None  # TP / (TP + FP) for +1 LFs; TN / (TN + FN) for -1 LFs
+
+
+@dataclass
 class EvaluationVote:
     labeling_function_id: str
     labeling_function_name: str
@@ -91,6 +106,9 @@ class EvaluationSummary:
     recall: float | None
     f1: float | None
     coverage: float | None
+    corpus_total_docs: int
+    corpus_covered_docs: int
+    corpus_coverage: float | None
 
 
 def _safe_div(num: float, den: float) -> float | None:
@@ -114,10 +132,10 @@ def evaluate_run(
     tag_id: str,
     run: LfRun,
     text_preview_chars: int = 200,
-) -> tuple[EvaluationSummary, list[EvaluationRow]]:
+) -> tuple[EvaluationSummary, list[EvaluationRow], list[LfStats]]:
     gold_rows = db.scalars(select(GoldLabel).where(GoldLabel.tag_id == tag_id)).all()
     if not gold_rows:
-        return _empty_summary(0), []
+        return _empty_summary(0), [], []
 
     doc_ids = [g.document_id for g in gold_rows]
     docs = {
@@ -209,6 +227,17 @@ def evaluate_run(
         f1 = 2 * precision * recall / (precision + recall)
     coverage = _safe_div(tp + tn + fp + fn, considered)
 
+    corpus_total = db.scalar(
+        select(func.count(Document.id)).where(Document.project_id == run.project_id)
+    ) or 0
+    corpus_covered = db.scalar(
+        select(func.count(func.distinct(LfRunVote.document_id))).where(
+            LfRunVote.run_id == run.id,
+            LfRunVote.vote != 0,
+        )
+    ) or 0
+    corpus_coverage = _safe_div(corpus_covered, corpus_total)
+
     summary = EvaluationSummary(
         total_gold=len(gold_rows),
         considered=considered,
@@ -223,6 +252,9 @@ def evaluate_run(
         recall=recall,
         f1=f1,
         coverage=coverage,
+        corpus_total_docs=corpus_total,
+        corpus_covered_docs=corpus_covered,
+        corpus_coverage=corpus_coverage,
     )
 
     priority = {
@@ -235,7 +267,64 @@ def evaluate_run(
         "gold_abstain": 6,
     }
     rows.sort(key=lambda r: (priority[r.category], -abs(r.vote_sum), r.document_id))
-    return summary, rows
+
+    # Per-LF stats: invert votes_by_doc into votes_by_lf then score against gold.
+    gold_by_doc = {g.document_id: int(g.value) for g in gold_rows}
+    votes_by_lf: dict[str, dict[str, int]] = defaultdict(dict)
+    for doc_id, doc_votes in votes_by_doc.items():
+        for v in doc_votes:
+            votes_by_lf[v.labeling_function_id][doc_id] = int(v.vote)
+
+    lf_stats: list[LfStats] = []
+    for lf_id in lf_ids:
+        lf = lfs.get(lf_id)
+        lf_name = lf.name if lf else "(deleted LF)"
+        lf_type = lf.type if lf else "unknown"
+        rv = int((lf.config or {}).get("return_value", 1)) if lf else 1
+
+        lf_votes = votes_by_lf.get(lf_id, {})
+        tp = fp = tn = fn = abs_pos = abs_neg = 0
+        for doc_id, gold in gold_by_doc.items():
+            if gold == 0:
+                continue
+            vote = lf_votes.get(doc_id, 0)
+            if gold == 1:
+                if vote > 0:
+                    tp += 1
+                elif vote < 0:
+                    fn += 1
+                else:
+                    abs_pos += 1
+            else:  # gold == -1
+                if vote < 0:
+                    tn += 1
+                elif vote > 0:
+                    fp += 1
+                else:
+                    abs_neg += 1
+
+        if rv == 1:
+            lf_precision = _safe_div(tp, tp + fp)
+        else:
+            lf_precision = _safe_div(tn, tn + fn)
+
+        lf_stats.append(
+            LfStats(
+                labeling_function_id=lf_id,
+                labeling_function_name=lf_name,
+                lf_type=lf_type,
+                return_value=rv,
+                true_positive=tp,
+                false_positive=fp,
+                true_negative=tn,
+                false_negative=fn,
+                abstain_on_positive=abs_pos,
+                abstain_on_negative=abs_neg,
+                precision=lf_precision,
+            )
+        )
+
+    return summary, rows, lf_stats
 
 
 def _empty_summary(total_gold: int) -> EvaluationSummary:
@@ -253,4 +342,7 @@ def _empty_summary(total_gold: int) -> EvaluationSummary:
         recall=None,
         f1=None,
         coverage=None,
+        corpus_total_docs=0,
+        corpus_covered_docs=0,
+        corpus_coverage=None,
     )

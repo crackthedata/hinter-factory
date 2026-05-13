@@ -1,13 +1,33 @@
 """Heuristic candidate-keyword miner for the "Suggested hinters" panel.
 
-Given a tag, propose new keyword labeling functions by mining:
+Given a tag, propose new keyword labeling functions by mining three signal
+sources for *positive* (+1) hinters and two for *negative* (-1) hinters:
 
-- Gold-labeled documents for the tag (positive vs negative class).
-- A sample of corpus documents (cold-start fallback when there are no gold labels).
-- The tag name itself (always seeded so the panel is useful before any labeling).
+Positive hinter signal sources
+--------------------------------
+1. Gold-labeled documents (positive class) — tokens more frequent in gold-+1
+   docs than gold-−1 docs are the primary candidates.
+2. Missed-positive documents from the latest completed LF run — gold-+1 docs
+   where the run produced a false-negative (vote_sum < 0) or abstained
+   (vote_sum == 0) receive a score boost so suggestions target the actual
+   recall gaps rather than already-covered ground.
+3. Cold-start corpus sample — when no gold labels exist, tag-name tokens from
+   a recent corpus sample are used as a fallback.
 
-Existing keyword/regex labeling functions for the tag are subtracted from the
-candidate set so we never re-suggest a token the user has already covered.
+Negative hinter signal sources
+--------------------------------
+1. Gold-labeled documents (negative class) — tokens more frequent in gold-−1
+   docs than gold-+1 docs.
+2. Missed-negative documents from the latest completed LF run — gold-−1 docs
+   where the run abstained (vote_sum == 0) or produced a false-positive
+   (vote_sum > 0) receive a symmetric score boost so suggestions also target
+   the precision gaps, not just the recall gaps.
+
+Other invariants
+-----------------
+- The tag name always gets a small boost in the positive direction.
+- Tokens already in an existing keyword/regex LF (per direction) are excluded.
+- ``exclude`` lets the UI thread dismissed suggestions back as covered tokens.
 
 The miner is a pure function over the database session; it does not write
 anything. It is invoked on-demand by the
@@ -26,7 +46,7 @@ from typing import Iterable, Literal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Document, GoldLabel, LabelingFunction, Tag
+from app.models import Document, GoldLabel, LabelingFunction, LfRun, LfRunVote, Tag
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9']{2,}")
@@ -51,15 +71,18 @@ _STOPWORDS = frozenset(
 )
 
 _TAG_NAME_BOOST = 0.5
+_MISS_BOOST = 0.5        # additive score uplift per unit of log(1 + missed_df)
 _COLD_START_DOC_SAMPLE = 500
 _EXAMPLE_DOC_LIMIT = 3
 _MAX_DOCS_PER_CLASS = 1000
+_MAX_MISSED_DOCS = 500   # cap so large runs stay cheap
 
 
 @dataclass
 class HinterSuggestion:
     keyword: str
     score: float
+    return_value: int  # +1 for positive hinter, -1 for negative hinter
     positive_hits: int
     negative_hits: int
     example_document_ids: list[str] = field(default_factory=list)
@@ -104,22 +127,120 @@ def _tag_name_tokens(name: str) -> list[str]:
     return out
 
 
-def _covered_tokens(lfs: Iterable[LabelingFunction]) -> set[str]:
-    """Tokens already represented by a keyword/regex LF for the tag."""
-    covered: set[str] = set()
+def _covered_tokens(lfs: Iterable[LabelingFunction]) -> tuple[set[str], set[str]]:
+    """Tokens already represented by keyword/regex LFs, split by return_value direction.
+
+    Returns ``(covered_positive, covered_negative)`` so that a token can still be
+    suggested as a negative hinter even if a positive LF already uses it, and
+    vice-versa.
+    """
+    covered_pos: set[str] = set()
+    covered_neg: set[str] = set()
     for lf in lfs:
         config = dict(lf.config or {})
+        rv = config.get("return_value", 1)
+        target = covered_neg if rv == -1 else covered_pos
         if lf.type == "keywords":
             for kw in config.get("keywords") or []:
                 if isinstance(kw, str):
-                    covered.add(kw.strip().lower())
+                    target.add(kw.strip().lower())
         elif lf.type == "regex":
             pattern = config.get("pattern")
             if isinstance(pattern, str):
                 for tok in _REGEX_TOKEN_RE.findall(pattern):
-                    covered.add(tok.lower())
-    covered.discard("")
-    return covered
+                    target.add(tok.lower())
+    covered_pos.discard("")
+    covered_neg.discard("")
+    return covered_pos, covered_neg
+
+
+def _missed_positive_doc_ids(
+    db: Session,
+    *,
+    tag_id: str,
+    gold_positive_ids: set[str],
+) -> list[str]:
+    """Return gold-positive document IDs that the latest completed run missed.
+
+    "Missed" covers two evaluation buckets:
+    - *false_negative*: vote_sum < 0 (LFs actively voted against a true positive).
+    - *abstain_on_positive*: vote_sum == 0 (no LF fired on a true positive).
+
+    Returns an empty list when there is no completed run yet for the tag, or
+    when ``gold_positive_ids`` is empty.
+    """
+    if not gold_positive_ids:
+        return []
+
+    run = db.scalar(
+        select(LfRun)
+        .where(LfRun.tag_id == tag_id, LfRun.status == "completed")
+        .order_by(LfRun.completed_at.desc(), LfRun.created_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        return []
+
+    doc_ids_list = list(gold_positive_ids)
+    vote_rows = db.scalars(
+        select(LfRunVote).where(
+            LfRunVote.run_id == run.id,
+            LfRunVote.document_id.in_(doc_ids_list),
+        )
+    ).all()
+
+    vote_sums: dict[str, int] = defaultdict(int)
+    for v in vote_rows:
+        vote_sums[v.document_id] += int(v.vote)
+
+    # vote_sum == 0 catches both "no LF fired" and "exact tie" — both are misses.
+    missed = [doc_id for doc_id in doc_ids_list if vote_sums.get(doc_id, 0) <= 0]
+    return missed[:_MAX_MISSED_DOCS]
+
+
+def _missed_negative_doc_ids(
+    db: Session,
+    *,
+    tag_id: str,
+    gold_negative_ids: set[str],
+) -> list[str]:
+    """Return gold-negative document IDs that the latest completed run missed.
+
+    "Missed" covers two evaluation buckets:
+    - *false_positive*: vote_sum > 0 (LFs actively voted for a true negative).
+    - *abstain_on_negative*: vote_sum == 0 (no LF fired on a true negative).
+
+    Returns an empty list when there is no completed run yet for the tag, or
+    when ``gold_negative_ids`` is empty.
+    """
+    if not gold_negative_ids:
+        return []
+
+    run = db.scalar(
+        select(LfRun)
+        .where(LfRun.tag_id == tag_id, LfRun.status == "completed")
+        .order_by(LfRun.completed_at.desc(), LfRun.created_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        return []
+
+    doc_ids_list = list(gold_negative_ids)
+    vote_rows = db.scalars(
+        select(LfRunVote).where(
+            LfRunVote.run_id == run.id,
+            LfRunVote.document_id.in_(doc_ids_list),
+        )
+    ).all()
+
+    vote_sums: dict[str, int] = defaultdict(int)
+    for v in vote_rows:
+        vote_sums[v.document_id] += int(v.vote)
+
+    # vote_sum == 0 catches both "no LF fired" and "exact tie"; vote_sum > 0
+    # means a false positive — both are misses for the negative class.
+    missed = [doc_id for doc_id in doc_ids_list if vote_sums.get(doc_id, 0) >= 0]
+    return missed[:_MAX_MISSED_DOCS]
 
 
 def suggest_keywords_for_tag(
@@ -130,7 +251,8 @@ def suggest_keywords_for_tag(
     limit: int = 10,
     exclude: Iterable[str] | None = None,
 ) -> SuggestionResult:
-    """Compute keyword suggestions for a tag.
+    """Compute keyword suggestions for a tag, including both positive (+1) and
+    negative (-1) hinters.
 
     The caller is responsible for verifying ``tag_id`` belongs to ``project_id``.
 
@@ -149,13 +271,16 @@ def suggest_keywords_for_tag(
             )
         )
     )
-    covered = _covered_tokens(existing_lfs)
+    covered_pos, covered_neg = _covered_tokens(existing_lfs)
+
+    # Dismissed tokens from the UI are excluded from both directions.
     if exclude:
         for token in exclude:
             if isinstance(token, str):
                 tok = token.strip().lower()
                 if tok:
-                    covered.add(tok)
+                    covered_pos.add(tok)
+                    covered_neg.add(tok)
 
     tag = db.get(Tag, tag_id)
     name_tokens = _tag_name_tokens(tag.name) if tag else []
@@ -181,26 +306,64 @@ def suggest_keywords_for_tag(
 
     pos_df: dict[str, int] = defaultdict(int)
     neg_df: dict[str, int] = defaultdict(int)
-    examples: dict[str, list[str]] = defaultdict(list)
+    pos_examples: dict[str, list[str]] = defaultdict(list)
+    neg_examples: dict[str, list[str]] = defaultdict(list)
+
+    # Process missed-positive docs first so they get priority in example slots.
+    missed_pos_ids = _missed_positive_doc_ids(
+        db, tag_id=tag_id, gold_positive_ids=set(pos_doc_ids)
+    )
+    missed_docs = _fetch_documents(db, missed_pos_ids) if missed_pos_ids else []
+    missed_df: dict[str, int] = defaultdict(int)
+    for doc in missed_docs:
+        toks = _tokenize(doc.text)
+        for tok in toks:
+            missed_df[tok] += 1
+            if len(pos_examples[tok]) < _EXAMPLE_DOC_LIMIT:
+                pos_examples[tok].append(doc.id)
+
+    # Process missed-negative docs (abstain-on-negative + false-positive from
+    # the latest run) so the negative scorer can boost tokens that appear there.
+    missed_neg_ids = _missed_negative_doc_ids(
+        db, tag_id=tag_id, gold_negative_ids=set(neg_doc_ids)
+    )
+    missed_neg_docs = _fetch_documents(db, missed_neg_ids) if missed_neg_ids else []
+    missed_neg_df: dict[str, int] = defaultdict(int)
+    for doc in missed_neg_docs:
+        toks = _tokenize(doc.text)
+        for tok in toks:
+            missed_neg_df[tok] += 1
+            if len(neg_examples[tok]) < _EXAMPLE_DOC_LIMIT:
+                neg_examples[tok].append(doc.id)
 
     for doc in pos_docs:
         toks = _tokenize(doc.text)
         for tok in toks:
             pos_df[tok] += 1
-            if len(examples[tok]) < _EXAMPLE_DOC_LIMIT:
-                examples[tok].append(doc.id)
+            if len(pos_examples[tok]) < _EXAMPLE_DOC_LIMIT:
+                pos_examples[tok].append(doc.id)
     for doc in neg_docs:
         toks = _tokenize(doc.text)
         for tok in toks:
             neg_df[tok] += 1
+            if len(neg_examples[tok]) < _EXAMPLE_DOC_LIMIT:
+                neg_examples[tok].append(doc.id)
 
     has_gold = bool(pos_docs or neg_docs)
     min_pos = 2 if len(pos_docs) >= 5 else 1
+    min_neg = 2 if len(neg_docs) >= 5 else 1
 
-    scored: dict[str, float] = {}
+    # Scored candidates: keyed by (token, return_value) to allow the same token
+    # to appear as both a positive and a negative hinter when the signal differs.
+    scored_pos: dict[str, float] = {}
+    scored_neg: dict[str, float] = {}
 
+    # Positive hinter candidates: tokens more frequent in gold-positive docs.
+    # Tokens that also appear in missed-positive docs (FN / abstain-on-positive
+    # from the latest run) receive an additive boost so suggestions target the
+    # real recall gaps rather than documents already covered.
     for tok, p in pos_df.items():
-        if tok in covered:
+        if tok in covered_pos:
             continue
         n = neg_df.get(tok, 0)
         if p < min_pos:
@@ -209,8 +372,25 @@ def suggest_keywords_for_tag(
             continue
         # Smoothed positive log-odds, weighted by support so a token in 5 pos
         # docs beats one in 2 even at the same purity.
-        score = math.log((p + 0.5) / (n + 0.5)) * math.log(1 + p)
-        scored[tok] = score
+        base_score = math.log((p + 0.5) / (n + 0.5)) * math.log(1 + p)
+        miss_boost = _MISS_BOOST * math.log(1 + missed_df.get(tok, 0))
+        scored_pos[tok] = base_score + miss_boost
+
+    # Negative hinter candidates: tokens more frequent in gold-negative docs.
+    # Tokens that appear in missed-negative docs (abstain-on-negative or
+    # false-positive from the latest run) receive the same additive boost as
+    # missed-positive tokens do for positive hinters, targeting precision gaps.
+    for tok, n in neg_df.items():
+        if tok in covered_neg:
+            continue
+        p = pos_df.get(tok, 0)
+        if n < min_neg:
+            continue
+        if n <= p:
+            continue
+        base_score = math.log((n + 0.5) / (p + 0.5)) * math.log(1 + n)
+        miss_boost = _MISS_BOOST * math.log(1 + missed_neg_df.get(tok, 0))
+        scored_neg[tok] = base_score + miss_boost
 
     # Cold-start: fall back to a corpus sample when there are zero gold labels.
     if not has_gold:
@@ -227,43 +407,57 @@ def suggest_keywords_for_tag(
             toks = _tokenize(doc.text)
             for tok in toks:
                 corpus_df[tok] += 1
-                if len(examples[tok]) < _EXAMPLE_DOC_LIMIT:
-                    examples[tok].append(doc.id)
-        # Without supervision we have no signal; surface only tag-name tokens.
-        # The corpus sample is still useful because it lets us attach example
-        # documents that contain the tag-name token.
+                if len(pos_examples[tok]) < _EXAMPLE_DOC_LIMIT:
+                    pos_examples[tok].append(doc.id)
+        # Without supervision we have no signal; surface only tag-name tokens
+        # as positive-hinter candidates.
         for tok in name_tokens:
-            if tok in covered or tok in scored:
+            if tok in covered_pos or tok in scored_pos:
                 continue
             if corpus_df.get(tok, 0) == 0:
                 # Still suggest the bare tag-name token even if it doesn't
-                # appear in the sample - the user named the tag this for a
-                # reason.
-                scored[tok] = _TAG_NAME_BOOST
+                # appear in the sample - the user named the tag this for a reason.
+                scored_pos[tok] = _TAG_NAME_BOOST
             else:
-                scored[tok] = _TAG_NAME_BOOST + math.log(1 + corpus_df[tok])
+                scored_pos[tok] = _TAG_NAME_BOOST + math.log(1 + corpus_df[tok])
 
-    # Tag-name boost (always): nudge tag-name tokens toward the top whether or
-    # not gold labels exist.
+    # Tag-name boost for positive hinters (always): nudge tag-name tokens toward
+    # the top whether or not gold labels exist.
     for tok in name_tokens:
-        if tok in covered:
+        if tok in covered_pos:
             continue
-        scored[tok] = scored.get(tok, 0.0) + _TAG_NAME_BOOST
+        scored_pos[tok] = scored_pos.get(tok, 0.0) + _TAG_NAME_BOOST
 
-    ranked = sorted(scored.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    # Take the top `limit` candidates from each direction independently so the
+    # caller always receives up to `limit` positive suggestions AND up to `limit`
+    # negative suggestions (up to 2×limit total).
+    top_pos = sorted(scored_pos.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    top_neg = sorted(scored_neg.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    # Positive suggestions first, then negative — preserves a predictable order
+    # that the UI can rely on for its two-section layout.
+    top = [(tok, score, 1) for tok, score in top_pos] + [
+        (tok, score, -1) for tok, score in top_neg
+    ]
 
     suggestions = [
         HinterSuggestion(
             keyword=tok,
             score=round(score, 4),
+            return_value=rv,
             positive_hits=pos_df.get(tok, 0),
             negative_hits=neg_df.get(tok, 0),
-            example_document_ids=list(examples.get(tok, []))[:_EXAMPLE_DOC_LIMIT],
+            example_document_ids=list(
+                (neg_examples if rv == -1 else pos_examples).get(tok, [])
+            )[:_EXAMPLE_DOC_LIMIT],
         )
-        for tok, score in ranked
+        for tok, score, rv in top
     ]
 
-    if has_gold and any(s.positive_hits > 0 for s in suggestions):
+    if has_gold and any(
+        (s.positive_hits > 0 and s.return_value == 1)
+        or (s.negative_hits > 0 and s.return_value == -1)
+        for s in suggestions
+    ):
         basis: Literal["gold", "tag_name", "mixed"] = (
             "mixed" if name_tokens else "gold"
         )

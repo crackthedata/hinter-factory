@@ -64,12 +64,15 @@ def get_evaluation(
                     "recall": None,
                     "f1": None,
                     "coverage": None,
+                    "corpus_total_docs": 0,
+                    "corpus_covered_docs": 0,
+                    "corpus_coverage": None,
                 },
                 "rows": [],
                 "message": "No completed LF run for this tag yet. Run LFs in Studio first.",
             }
 
-    summary, rows = evaluate_run(
+    summary, rows, lf_stats = evaluate_run(
         db, tag_id=tag_id, run=run, text_preview_chars=text_preview_chars
     )
 
@@ -82,5 +85,6 @@ def get_evaluation(
         "run_completed_at": run.completed_at.isoformat() + "Z" if run.completed_at else None,
         "summary": asdict(summary),
         "rows": [asdict(r) for r in rows],
+        "lf_stats": [asdict(s) for s in lf_stats],
         "truncated": truncated,
     }

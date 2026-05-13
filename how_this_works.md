@@ -2,7 +2,7 @@
 
 A plain-English guide to the core data model, the relationship between **tags**, **labeling functions** ("hinters"), and **gold labels**, and the full label → run → evaluate → fix loop.
 
-If you want code-level detail, the canonical references are `services/ml/app/models.py` (schema), `services/ml/app/lf_executor.py` (LF runtime), and `services/ml/app/evaluation.py` (aggregation + metrics). This document is the conceptual overview.
+If you want code-level detail, the canonical references are `services/ml/app/models.py` (schema), `services/ml/app/lf_executor.py` (LF runtime), `services/ml/app/suggestions.py` (keyword miner), and `services/ml/app/evaluation.py` (aggregation + metrics). This document is the conceptual overview.
 
 ---
 
@@ -67,11 +67,13 @@ There are five LF `type`s, configured via a JSON `config` blob:
 
 | Type | What it does | Config keys |
 |---|---|---|
-| `regex` | Fires `+1` if a regex matches the text | `pattern`, optional `flags` (e.g. `"i"` for case-insensitive) |
-| `keywords` | Fires `+1` if **any** (or **all**) of a list of keywords appears | `keywords: string[]`, `mode: "any" \| "all"` |
-| `structural` | Fires `+1` if the document satisfies length / caps-ratio / punctuation-ratio bounds | `length_gte`, `length_lte`, `caps_ratio_gte`, `caps_ratio_lte`, `punctuation_ratio_gte`, `punctuation_ratio_lte` |
+| `regex` | Fires if a regex matches the text | `pattern`, optional `flags` (e.g. `"i"` for case-insensitive), optional `return_value` (`1` or `-1`, default `1`) |
+| `keywords` | Fires if **any** (or **all**) of a list of keywords appears | `keywords: string[]`, `mode: "any" \| "all"`, optional `return_value` (`1` or `-1`, default `1`) |
+| `structural` | Fires if the document satisfies length / caps-ratio / punctuation-ratio bounds | `length_gte`, `length_lte`, `caps_ratio_gte`, `caps_ratio_lte`, `punctuation_ratio_gte`, `punctuation_ratio_lte`, optional `return_value` (`1` or `-1`, default `1`) |
 | `zeroshot` | Reserved for a zero-shot classifier (currently stub: always `0`) | — |
 | `llm_prompt` | Reserved for an LLM prompt-based classifier (currently stub: always `0`) | — |
+
+The optional `return_value` key (supported by `regex`, `keywords`, and `structural`) lets any LF vote *negatively*. A LF with `"return_value": -1` returns `−1` on a match and `0` on a miss — exactly the semantics needed for "this document definitely does **not** have the tag". The Suggested hinters panel creates LFs with the correct `return_value` automatically based on which class each keyword is more associated with.
 
 **Cardinality:** *Tag 1 — N LabelingFunction.* One tag can have many LFs (a regex *and* a keyword list *and* a structural rule, all voting on the same `is_invoice` tag). Each LF only ever votes on its own tag.
 
@@ -92,7 +94,60 @@ You **can** see what each individual LF voted, in two places:
 
 ---
 
-## 4. The LF run
+## 4. Suggested hinters
+
+The **Suggested hinters** panel in LF Studio proposes new keyword labeling functions by mining the gold-labeled records you've already created. Its job is to surface tokens that are statistically predictive for a tag so you can add them as LFs in one click rather than having to guess at keywords manually.
+
+### How the miner works
+
+The entry point is `suggest_keywords_for_tag` in `services/ml/app/suggestions.py`. The algorithm:
+
+1. **Load gold-labeled documents for the tag.** Separate them into a *positive set* (gold value `+1`) and a *negative set* (gold value `−1`). Documents with gold value `0` are ignored.
+
+2. **Identify missed-positive documents from the latest run.** If a completed `LfRun` exists for the tag, the miner queries `LfRunVote` to compute the vote sum for each gold-positive document. Any gold-positive doc where `vote_sum ≤ 0` is a *missed positive* — either a false-negative (the run actively voted `−1`) or an abstain-on-positive (no LF fired). These document IDs are passed to `_missed_positive_doc_ids` and their text is tokenised into a separate `missed_df` frequency table.
+
+3. **Build per-class document-frequency tables.** For each class, tokenise the document texts (lowercase, remove stopwords, require ≥ 3 characters) and count how many distinct documents each token appears in: `pos_df[token]` and `neg_df[token]`.
+
+4. **Score positive hinter candidates.** A token qualifies as a positive (`+1`) hinter candidate if it appears in more positive docs than negative docs (`pos_df > neg_df`). Its score is:
+
+   ```
+   base_score = log((pos + 0.5) / (neg + 0.5))  ×  log(1 + pos)
+   miss_boost = MISS_BOOST × log(1 + missed_df[token])
+   score      = base_score + miss_boost
+   ```
+
+   `base_score` is a smoothed log-odds ratio weighted by support (a token in 10 positive docs beats one in 2 at the same purity). `miss_boost` is an additive uplift for tokens that appear in the documents the latest run got wrong — this steers suggestions toward real recall gaps rather than already-covered ground. The boost is zero when there is no completed run yet.
+
+5. **Score negative hinter candidates.** Symmetrically, a token qualifies as a negative (`−1`) hinter candidate if it appears in more negative docs than positive docs (`neg_df > pos_df`). Its score uses the same log-odds formula with the class counts swapped (no missed-positive boost applies here):
+
+   ```
+   score = log((neg + 0.5) / (pos + 0.5))  ×  log(1 + neg)
+   ```
+
+6. **Combine and rank.** All candidates — both positive and negative — are sorted by score in descending order and the top `limit` (default 10) are returned. Each suggestion carries a `return_value` field (`+1` or `−1`) so the UI knows which vote direction to wire into the created LF's config.
+
+7. **Subtract already-covered tokens.** Before scoring, the miner inspects every existing `keywords` and `regex` LF for the tag and extracts the tokens they already cover. It tracks coverage *per direction* — a token used in a `+1` LF can still be suggested as a `−1` hinter if the data supports it, and vice versa. Dismissed suggestions from the UI session are also passed as an `exclude` list and treated as covered in both directions.
+
+### Cold-start (no gold labels yet)
+
+When there are no gold labels for a tag, the miner has no class signal. It falls back to:
+
+1. Sampling up to 500 recent corpus documents to check which tag-name tokens appear in the corpus at all.
+2. Returning those tag-name tokens (derived by splitting the tag name on underscores, hyphens, whitespace, and camelCase boundaries) as positive hinter candidates, boosted by corpus frequency.
+
+This means even a brand-new tag immediately shows a few candidates — they just come from the tag name rather than labeled data. The `basis` field in the response is `"tag_name"` in this case, `"gold"` when driven entirely by gold signal, or `"mixed"` when both contribute.
+
+### Tag-name boost
+
+Regardless of whether gold labels exist, the miner always applies a small constant boost to any tag-name token found in the scored set. This nudges the word you chose for the tag name toward the top — you named the tag that for a reason, and the corresponding keyword is usually a safe first LF to create.
+
+### The `return_value` in practice
+
+When you click **Add as +1 LF** or **Add as −1 LF**, the Studio page creates a `keywords` LF whose JSON config includes `"return_value": 1` or `"return_value": -1` respectively. The executor in `lf_executor.py` reads that field and returns it instead of the default `+1` whenever a keyword matches. This is how you build negative hinters — LFs that actively vote *against* a document matching a tag.
+
+---
+
+## 5. The LF run
 
 A run is **a batch execution of a chosen subset of LFs against the entire corpus, scoped to one tag**.
 
@@ -109,7 +164,7 @@ The sparse matrix is exposed at `GET /v1/lf-runs/{id}/matrix` for downstream too
 
 ---
 
-## 5. Gold labels and the validation set
+## 6. Gold labels and the validation set
 
 `GoldLabel` is your manual ground truth, keyed on `(document_id, tag_id)`:
 
@@ -123,7 +178,7 @@ A few dozen confident gold labels per tag is usually enough to start — you can
 
 ---
 
-## 6. Evaluation: aggregating LF votes vs. gold
+## 7. Evaluation: aggregating LF votes vs. gold
 
 For each gold-labeled document in the validation set, the evaluator:
 
@@ -156,7 +211,7 @@ The Evaluation page sorts errors first (FP, FN, abstain-on-positive), then every
 
 ---
 
-## 7. The end-to-end loop
+## 8. The end-to-end loop
 
 ```
 1. Create a project at /projects (required — every page is scoped to one).
@@ -166,38 +221,52 @@ The Evaluation page sorts errors first (FP, FN, abstain-on-positive), then every
 
 3. LF Studio → create a tag (e.g. "is_invoice").
 
-4. LF Studio → author one or more LFs for the tag.
+4. Explore → gold-label a small seed set FIRST.
+        Pick the tag in the filter bar, vote +1/-1 on ~10-20 confident docs.
+        Even a handful of labels is enough for suggest_keywords_for_tag to
+        start mining positive and negative keyword candidates.
+
+5. LF Studio → open the Suggested hinters panel.
+        Review candidates — each carries a +1 or -1 direction, hit counts
+        for both gold classes, and a heuristic confidence score.
+        Click "Add as +1 LF" / "Add as -1 LF" to create keyword LFs in
+        one step, or dismiss suggestions you don't want to see again.
+
+6. LF Studio → author additional LFs by hand where needed.
         Use Preview to sanity-check on sample documents.
 
-5. Explore → gold-label a small validation set.
-        Pick the tag in the filter bar, vote +1/-1 on ~20-50 confident docs.
+7. LF Studio → click Run to execute all selected LFs across the corpus.
 
-6. LF Studio → click Run to execute all selected LFs across the corpus.
-
-7. Evaluation → pick the tag.
+8. Evaluation → pick the tag.
         Read precision, recall, F1, coverage.
         Open false-positive / false-negative rows.
         Expand Per-LF votes to see which LF caused each mistake.
 
-8. Back to LF Studio → tighten the offending regex,
+9. Back to LF Studio → tighten the offending regex,
         narrow the keyword list, add a structural guard,
         or write a new LF for cases nothing covered.
+        Add more gold labels in Explore as you discover edge cases —
+        each new label improves future suggestion quality.
+        Check the Suggested hinters panel again: after a run, the miner
+        boosts tokens found in the run's false-negative and
+        abstain-on-positive documents, so suggestions now target the
+        specific documents your current LFs are still missing.
 
-9. Re-run, re-evaluate. Repeat until metrics are good enough.
+10. Re-run, re-evaluate. Repeat until metrics are good enough.
 
-10. (Optional) /projects → Export to ship the workspace
+11. (Optional) /projects → Export to ship the workspace
         to another instance of Hinter Factory.
 ```
 
 ---
 
-## 8. Quick reference: the schema, in one paragraph
+## 9. Quick reference: the schema, in one paragraph
 
 A `Project` owns `Document`s, `Tag`s, `LabelingFunction`s, `GoldLabel`s, `LfRun`s, and `ProbabilisticLabel`s. A `Tag` is a single binary concept. A `LabelingFunction` belongs to exactly one tag and is a heuristic that emits `+1 / 0 / −1` per document. A `GoldLabel` is your manual `+1 / 0 / −1` per `(document, tag)`. An `LfRun` is a batch execution of a chosen set of LFs for a tag, producing one `LfRunVote` per `(document, LF)` that fired (abstains are not stored). The Evaluation endpoint sums the LF votes per document, compares the sum-majority prediction to the gold label, and produces per-bucket counts plus precision / recall / F1 / coverage.
 
 ---
 
-## 9. FAQ
+## 10. FAQ
 
 **Is "hinter" the same as "labeling function"?**
 Yes. "Hinter" is the product/UX name; "labeling function" (or "LF") is the technical term. Each one is a heuristic that *hints* at whether a document matches a tag. There is no separate `Hinter` entity in the database.
