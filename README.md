@@ -208,6 +208,21 @@ python headless.py \
   --text-column "text_column_name"
 ```
 
+The `--text-column` value must match the CSV header exactly (case-sensitive). If it doesn't match, the script prints the available column names and exits.
+
+By default the script uses the same SQLite database as the API (`services/ml/data/hinter.db`). If your database lives elsewhere, set `HINTER_DATABASE_URL` before running:
+
+```bash
+HINTER_DATABASE_URL=sqlite:////absolute/path/to/hinter.db python headless.py ...
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:HINTER_DATABASE_URL = "sqlite:///C:/path/to/hinter.db"
+python headless.py ...
+```
+
 ## Python tests
 
 From `services/ml` with the venv activated:
