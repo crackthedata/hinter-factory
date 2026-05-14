@@ -6,8 +6,8 @@ Monorepo for the Hinter Factory MVP: a Next.js UI, a FastAPI ML/API service, and
 
 | Path | Role |
 |------|------|
-| `apps/web` | Next.js (App Router), Tailwind, Explore + LF Studio + Evaluation + Projects pages, project context with header selector |
-| `services/ml` | FastAPI, SQLAlchemy, SQLite corpus store, ingest, LF execution, matrix export, evaluation, project scoping + JSON export/import |
+| `apps/web` | Next.js (App Router), Tailwind, Explore + LF Studio + Topics + Evaluation + Projects pages, project context with header selector |
+| `services/ml` | FastAPI, SQLAlchemy, SQLite corpus store, ingest, LF execution, matrix export, evaluation, topic modeling, project scoping + JSON export/import |
 | `packages/contracts` | OpenAPI spec (`openapi/openapi.yaml`) and generated-style TS types (`src/generated/api.ts`) consumed by the web app |
 
 The web app proxies API traffic through Next.js rewrites: browser calls go to `/api/ml/...`, which forwards to the ML service on port 8000.
@@ -123,6 +123,7 @@ That runs `openapi-typescript` in `@hinter/contracts` and overwrites `packages/c
   - **Manual gold labels.** After you create tags in LF Studio, pick a tag at the bottom of the Explore filters and vote **+1** (positive for tag), **0** (abstain / unsure), or **−1** (negative) per document. Labels apply to the documents shown on the current page (default limit 50). The same `+1 / 0 / −1` semantics apply to LF votes.
 - **LF Studio:** Author regex, keyword, and structural labeling functions; preview votes on sample rows; run a batch over the corpus; export a sparse label matrix from a completed run.
   - **Suggested hinters.** After you gold-label even a few documents, the **Suggested hinters** panel mines your gold-positive and gold-negative documents for statistically predictive keywords. Each suggestion comes with a direction (`+1` or `−1`), hit counts for both gold classes, and a heuristic confidence score. Click **Add as +1 LF** / **Add as −1 LF** to create a `keywords` labeling function in one step. Before any gold labels exist, the panel falls back to tokens derived from the tag name itself ("cold-start"). The underlying miner is `suggest_keywords_for_tag` in `services/ml/app/suggestions.py`; it is invoked on demand by `GET /v1/labeling-functions/suggestions`.
+- **Topic Modeling:** Unsupervised discovery of latent themes in your corpus to generate keyword hinter suggestions, with or without gold labels. See the [Topic Modeling](#topic-modeling) section for full details.
 - **Evaluation:** For a chosen tag, treats every gold-labeled document as a validation example, aggregates LF votes from a run, and surfaces the documents the system would currently get **wrong** so you can fix the responsible LFs.
   - **Validation set.** All documents with a gold label whose value is `+1` or `−1` for the selected tag. Gold value `0` is reported as `gold_abstain` and excluded from precision / recall / F1.
   - **Predicted label.** Sum-of-votes majority over the run's LF votes per document: sum > 0 → predict `+1`, sum < 0 → predict `−1`, sum == 0 → abstain. Pure function in `services/ml/app/evaluation.py:aggregate_vote` if you want to swap in a label model later.
@@ -143,16 +144,94 @@ That runs `openapi-typescript` in `@hinter/contracts` and overwrites `packages/c
 1. **Pick (or create) a project** from the header selector or `/projects`. Everything you do next is scoped to it.
 2. **Ingest a CSV/JSON corpus** in *Explore* (set the right text column, click Upload).
 3. **Create a tag** in *LF Studio* (e.g. "is_invoice").
-4. **Manually label some documents first** in *Explore*: pick the tag in the filter bar, then vote `+1` (positive for this tag), `0` (unsure), or `−1` (negative) on a handful of documents you're confident about — even 10–20 labels is enough to seed the next step. Do this *before* authoring LFs so the suggestion miner has signal to work with.
-5. **Review suggested hinters** in *LF Studio* → **Suggested hinters** panel. The miner (`suggest_keywords_for_tag`) compares token frequencies across your gold-positive and gold-negative documents and surfaces keyword candidates with a `+1` or `−1` direction:
-   - A **+1 suggestion** is a token that appears more often in your gold-positive documents — clicking **Add as +1 LF** creates a `keywords` LF that votes `+1` whenever that word appears.
-   - A **−1 suggestion** is a token more frequent in your gold-negative documents — **Add as −1 LF** creates a `keywords` LF that actively votes *against* the tag.
-   - Use **Dismiss** to skip a candidate; the panel refreshes with fresh suggestions automatically.
-6. **Author additional labeling functions** by hand in *LF Studio* (regex, keywords, structural) for patterns the suggestions didn't cover. Use **Preview** to sanity-check on sample docs before running a full batch.
-7. **Run the LFs** on the full corpus from *LF Studio*.
-8. **Open *Evaluation***, pick the tag. Read the false-negative and false-positive lists, expand the per-LF breakdowns, and use what you learn to tighten or add LFs in Studio. Add more gold labels in *Explore* as you discover edge cases — each new label improves future suggestion quality.
-9. Re-run and re-evaluate. Repeat until metrics are good enough.
-10. **Share work between machines.** From `/projects`, **Export** the project to a JSON file and hand it off; on the other instance, **Import** that file to recreate the entire workspace.
+4. **Run a topic model** in *Topics* to get a map of the corpus before you've written a single LF. Choose the number of topics (10 is a good default), pick LDA or NMF, and click **Run topic model**. While it fits in the background, continue to the next step.
+5. **Manually label some documents first** in *Explore*: pick the tag in the filter bar, then vote `+1` (positive for this tag), `0` (unsure), or `−1` (negative) on a handful of documents you're confident about — even 10–20 labels is enough to seed the next steps.
+6. **Review topic-based suggestions** in *Topics* once the run completes: pick the tag you created, and the panel surfaces the topics most aligned with your gold-positive documents, then ranks their top keywords as hinter candidates. Click **Add as +1 LF** on any keyword to create a `keywords` labeling function in one step. Use **Dismiss** to skip terms that look like noise.
+7. **Review frequency-based suggestions** in *LF Studio* → **Suggested hinters** panel. This miner works differently — it compares raw token frequencies across gold classes — so it often surfaces complementary candidates to the topic model. Add, dismiss, and refresh as needed.
+8. **Author additional labeling functions** by hand in *LF Studio* (regex, keywords, structural) for patterns neither suggestion source covered. Use **Preview** to sanity-check on sample docs before running a full batch.
+9. **Run the LFs** on the full corpus from *LF Studio*.
+10. **Open *Evaluation***, pick the tag. Read the false-negative and false-positive lists, expand the per-LF breakdowns, and use what you learn to tighten or add LFs in Studio. Add more gold labels in *Explore* as you discover edge cases — each new label improves both future topic-based and frequency-based suggestion quality.
+11. Re-run and re-evaluate. Repeat until metrics are good enough.
+12. **Share work between machines.** From `/projects`, **Export** the project to a JSON file and hand it off; on the other instance, **Import** that file to recreate the entire workspace.
+
+## Topic Modeling
+
+### What it is
+
+Topic modeling is an unsupervised machine-learning technique that reads your entire corpus and groups words that tend to appear together into *topics* — clusters of related vocabulary that represent recurring themes. It does not need gold labels or labeling functions to run: it works purely from the text itself. The output is a set of topics, each described by its top-weighted words (e.g. a topic might surface `invoice`, `payment`, `billing`, `amount`, `due` — revealing an invoicing theme without you having to name it first).
+
+Hinter Factory uses two well-established algorithms from scikit-learn:
+
+| Algorithm | Full name | When to prefer it |
+|-----------|-----------|-------------------|
+| **LDA** | Latent Dirichlet Allocation | Default. Probabilistic model; topics are soft distributions over words. Good for general text with many overlapping themes. |
+| **NMF** | Non-negative Matrix Factorization | Produces crisper, more separable topics. Often better when documents are short or themes are fairly distinct. |
+
+Both operate on a bag-of-words representation of your corpus (LDA uses raw counts; NMF uses TF-IDF). English stop words are removed automatically. Rare words (appearing in fewer than 2 documents) and very common words (appearing in more than 95% of documents) are filtered out to keep the vocabulary meaningful.
+
+### How it is implemented
+
+**Backend** (`services/ml/app/topic_modeling.py`, `services/ml/app/routers/topics.py`):
+
+1. A `POST /v1/topic-models` request creates a `TopicModel` row with status `pending` and immediately returns HTTP 202. A daemon thread then calls `run_topic_model()`, which:
+   - Fetches all documents for the project from SQLite.
+   - Builds a vocabulary capped at `max_features` words (default 5 000).
+   - Fits LDA or NMF with the requested number of topics.
+   - Extracts the top 20 words per topic with their weights.
+   - Records each document's *dominant topic* (the topic with the highest probability for that document) as a `{doc_id: topic_index}` map.
+   - Writes topics and the doc→topic map back into the `TopicModel` row and sets status `completed` (or `failed` on error).
+2. `GET /v1/topic-models/{id}` returns the full model including all topics once complete.
+3. `GET /v1/topic-models/{id}/suggestions?tag_id=…` computes hinter suggestions on demand:
+   - Looks up gold-positive (value `+1`) and gold-negative (value `−1`) document ids for the tag.
+   - Uses the stored doc→topic map to count how often each topic appears in the positive vs negative class.
+   - Scores each topic by `(positive_frequency − negative_frequency)` to find the ones most discriminative for the tag.
+   - Collects the top-weighted words from the highest-scoring topics, merges them weighted by topic relevance, and returns up to `limit` suggestions.
+   - **Cold-start:** if there are no gold labels yet, returns top words from the largest topics so you still get candidates to work from.
+
+**Storage:** topic model runs are scoped to a project via `project_id` (CASCADE delete). Topics and doc→topic assignments are stored as JSON columns in the `topic_models` SQLite table. Topic model data is **not** included in the project export bundle.
+
+**Frontend** (`apps/web/app/topics/page.tsx`):
+
+- Left sidebar: run-configuration form (topic count slider 2–50, algorithm selector, vocabulary size input) + list of past runs with live status badges that poll every 2.5 s until the run reaches a terminal state.
+- Right panel: a grid of topic cards — each showing its top-10 words as opacity-weighted chips (heavier words are more opaque). Topics that are identified as relevant to the selected tag are highlighted with an accent border.
+- Suggestions panel: tag selector, a "Relevant topics" legend showing which topics aligned with the tag and their relevance scores, then a ranked list of keyword candidates each with **Add as +1 LF** and **Dismiss** buttons. Dismissed words are excluded from subsequent refreshes.
+
+### Parameters
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| **Number of topics** | 10 | How many distinct themes to find. Use 5–10 for small or focused corpora; 15–30 for large, diverse ones. More topics = finer granularity but more noise. |
+| **Algorithm** | LDA | Switch to NMF if topics feel blurry or documents are short. |
+| **Max vocabulary size** | 5 000 | Caps the number of unique words considered. Lower (1 000–2 000) for small corpora; raise only if topics feel too generic on a large domain-rich dataset. |
+
+### Using topic modeling in your workflow
+
+**Before you have gold labels (cold-start discovery):**
+
+Run a topic model immediately after ingesting your corpus — before creating any tags or writing any LFs. Browse the topic cards to understand what themes are actually present in your data. This often reveals categories you hadn't anticipated and helps you decide which tags are worth creating. When you open the Suggestions panel and pick a tag, the cold-start mode returns the top vocabulary from the most prominent topics, giving you a starter set of keywords even with zero gold labels.
+
+**After labeling a few documents (gold-aligned suggestions):**
+
+Once you have even 10–20 gold labels for a tag, the suggestion algorithm switches from cold-start to gold-aligned mode. It identifies which topics your positive examples cluster into versus your negative examples, then ranks keywords from those discriminating topics. Because the topic model considers the full distributional context of words (not just their raw frequency), it often surfaces thematically coherent keyword sets that the frequency-based miner in LF Studio misses — and vice versa. **Use both suggestion sources together** for the broadest coverage.
+
+**Iterating:**
+
+Topic models are cheap to re-run. If your corpus grows significantly, or if your initial run produced unsatisfying topics (too coarse, too noisy), run another with different parameters and compare. Each run is stored separately so you can keep the old one for reference. Old runs that are no longer useful can be deleted with the **Delete** button in the Past runs list.
+
+**Typical signal-to-noise heuristics:**
+- If a suggested keyword is a proper noun or domain term you recognise as highly relevant → add it.
+- If a suggested keyword is generic filler (`said`, `would`, `also`) → dismiss it; it probably leaked through because the stop-word list is English-only.
+- If the Relevant topics panel shows low relevance scores (close to 0) for all topics → you need more gold labels before the alignment is meaningful.
+
+### Topic model API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/topic-models` | Start a new run. Body: `{n_topics, algorithm, max_features}`. Returns HTTP 202 with status `pending`. |
+| `GET` | `/v1/topic-models` | List all runs for the active project. |
+| `GET` | `/v1/topic-models/{id}` | Fetch a run. Includes `topics` array once `status` is `completed`. |
+| `DELETE` | `/v1/topic-models/{id}` | Delete a run and its stored data. |
+| `GET` | `/v1/topic-models/{id}/suggestions?tag_id=…[&limit=10][&exclude=word1&exclude=word2]` | Keyword suggestions for a tag. Use `exclude` to carry dismissed words across refreshes. |
 
 ## API surface
 

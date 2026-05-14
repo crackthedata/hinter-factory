@@ -22,6 +22,7 @@ tags:
   - name: probabilisticLabels
   - name: goldLabels
   - name: evaluation
+  - name: topicModels
 paths:
   /v1/projects:
     get:
@@ -808,6 +809,135 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GoldLabel"
+  /v1/topic-models:
+    post:
+      tags: [topicModels]
+      operationId: createTopicModel
+      summary: Start a topic model run
+      description: >-
+        Fits LDA or NMF on the project corpus in a background thread.
+        Returns HTTP 202 immediately; poll GET /v1/topic-models/{id} for status.
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TopicModelCreate"
+      responses:
+        "202":
+          description: Accepted – run started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopicModel"
+    get:
+      tags: [topicModels]
+      operationId: listTopicModels
+      summary: List topic model runs for the active project
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TopicModel"
+  /v1/topic-models/{model_id}:
+    get:
+      tags: [topicModels]
+      operationId: getTopicModel
+      summary: Get a topic model run (includes topics when completed)
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopicModel"
+        "404":
+          description: Not found
+    delete:
+      tags: [topicModels]
+      operationId: deleteTopicModel
+      summary: Delete a topic model run
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found
+  /v1/topic-models/{model_id}/suggestions:
+    get:
+      tags: [topicModels]
+      operationId: getTopicSuggestions
+      summary: Get keyword suggestions from a topic model for a tag
+      description: >-
+        Aligns topics to the tag's gold labels and returns top keywords as
+        hinter candidates. Falls back to corpus-wide topic words for cold-start.
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: tag_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 10, minimum: 1, maximum: 50 }
+        - name: exclude
+          in: query
+          required: false
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopicSuggestionsResponse"
+        "404":
+          description: Topic model or tag not found
+        "409":
+          description: Topic model not yet completed
 components:
   parameters:
     DocumentId:
@@ -1519,3 +1649,118 @@ components:
           type: array
           items: { type: string }
           description: Any errors encountered during CSV/JSON parsing
+    TopicModelStatus:
+      type: string
+      enum: [pending, running, completed, failed]
+    TopicModelCreate:
+      type: object
+      required: []
+      properties:
+        n_topics:
+          type: integer
+          minimum: 2
+          maximum: 100
+          default: 10
+          description: Number of topics to discover
+        algorithm:
+          type: string
+          enum: [lda, nmf]
+          default: lda
+          description: Topic modeling algorithm
+        max_features:
+          type: integer
+          minimum: 100
+          maximum: 50000
+          default: 5000
+          description: Vocabulary size cap
+    TopicWord:
+      type: object
+      required: [word, weight]
+      properties:
+        word:
+          type: string
+        weight:
+          type: number
+          format: float
+    Topic:
+      type: object
+      required: [id, top_words]
+      properties:
+        id:
+          type: integer
+          description: Zero-based topic index
+        top_words:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopicWord"
+    TopicModel:
+      type: object
+      required: [id, project_id, n_topics, algorithm, max_features, status, documents_processed, created_at]
+      properties:
+        id:
+          type: string
+        project_id:
+          type: string
+        n_topics:
+          type: integer
+        algorithm:
+          type: string
+        max_features:
+          type: integer
+        status:
+          $ref: "#/components/schemas/TopicModelStatus"
+        error:
+          type: string
+          nullable: true
+        documents_processed:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        topics:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/Topic"
+          description: Populated only on GET /v1/topic-models/{id}
+    TopicSuggestion:
+      type: object
+      required: [word, score]
+      properties:
+        word:
+          type: string
+        score:
+          type: number
+          format: float
+    RelevantTopic:
+      type: object
+      required: [topic_id, relevance_score, top_words]
+      properties:
+        topic_id:
+          type: integer
+        relevance_score:
+          type: number
+          format: float
+        top_words:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopicWord"
+    TopicSuggestionsResponse:
+      type: object
+      required: [relevant_topics, suggestions, basis]
+      properties:
+        relevant_topics:
+          type: array
+          items:
+            $ref: "#/components/schemas/RelevantTopic"
+        suggestions:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopicSuggestion"
+        basis:
+          type: string
+          description: "'gold' when gold labels guided alignment, 'corpus' for cold-start, 'no_model' when model is not ready"

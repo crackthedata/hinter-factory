@@ -420,6 +420,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/topic-models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listTopicModels"];
+        put?: never;
+        post: operations["createTopicModel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/topic-models/{model_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getTopicModel"];
+        put?: never;
+        post?: never;
+        delete: operations["deleteTopicModel"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/topic-models/{model_id}/suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getTopicSuggestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -888,6 +936,59 @@ export interface components {
             documents: components["schemas"]["PredictionDocument"][];
             /** @description Any errors encountered during CSV/JSON parsing */
             ingest_errors?: string[];
+        };
+        /** @enum {string} */
+        TopicModelStatus: "pending" | "running" | "completed" | "failed";
+        TopicModelCreate: {
+            /** @description Number of topics to discover */
+            n_topics?: number;
+            /** @description Topic modeling algorithm @enum {string} */
+            algorithm?: "lda" | "nmf";
+            /** @description Vocabulary size cap */
+            max_features?: number;
+        };
+        TopicWord: {
+            word: string;
+            /** Format: float */
+            weight: number;
+        };
+        Topic: {
+            /** @description Zero-based topic index */
+            id: number;
+            top_words: components["schemas"]["TopicWord"][];
+        };
+        TopicModel: {
+            id: string;
+            project_id: string;
+            n_topics: number;
+            algorithm: string;
+            max_features: number;
+            status: components["schemas"]["TopicModelStatus"];
+            error?: string | null;
+            documents_processed: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            completed_at?: string | null;
+            /** @description Populated only on GET /v1/topic-models/{id} */
+            topics?: components["schemas"]["Topic"][] | null;
+        };
+        TopicSuggestion: {
+            word: string;
+            /** Format: float */
+            score: number;
+        };
+        RelevantTopic: {
+            topic_id: number;
+            /** Format: float */
+            relevance_score: number;
+            top_words: components["schemas"]["TopicWord"][];
+        };
+        TopicSuggestionsResponse: {
+            relevant_topics: components["schemas"]["RelevantTopic"][];
+            suggestions: components["schemas"]["TopicSuggestion"][];
+            /** @description 'gold' when gold labels guided alignment, 'corpus' for cold-start, 'no_model' when model is not ready */
+            basis: string;
         };
     };
     responses: never;
@@ -1819,6 +1920,155 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["GoldLabel"];
                 };
+            };
+        };
+    };
+    createTopicModel: {
+        parameters: {
+            query?: {
+                project_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TopicModelCreate"];
+            };
+        };
+        responses: {
+            /** @description Accepted – run started */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicModel"];
+                };
+            };
+        };
+    };
+    listTopicModels: {
+        parameters: {
+            query?: {
+                project_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicModel"][];
+                };
+            };
+        };
+    };
+    getTopicModel: {
+        parameters: {
+            query?: {
+                project_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicModel"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    deleteTopicModel: {
+        parameters: {
+            query?: {
+                project_id?: string;
+            };
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getTopicSuggestions: {
+        parameters: {
+            query: {
+                tag_id: string;
+                project_id?: string;
+                limit?: number;
+                exclude?: string[];
+            };
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicSuggestionsResponse"];
+                };
+            };
+            /** @description Topic model or tag not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Topic model not yet completed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
