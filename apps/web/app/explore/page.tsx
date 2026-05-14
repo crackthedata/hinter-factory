@@ -752,7 +752,9 @@ export default function ExplorePage() {
               <th className="px-3 py-2">Metadata</th>
               <th className="w-full px-3 py-2">Text</th>
               {goldTagId ? (
-                <th className="px-2 py-2 whitespace-nowrap">Gold</th>
+                <th className="sticky right-0 bg-ink-900/90 px-3 py-2 whitespace-nowrap shadow-[-4px_0_6px_rgba(0,0,0,0.4)]">
+                  Gold
+                </th>
               ) : null}
             </tr>
           </thead>
@@ -794,8 +796,8 @@ export default function ExplorePage() {
                   ) : null}
                 </td>
                 {goldTagId ? (
-                  <td className="px-2 py-2 align-top">
-                    <div className="flex flex-wrap gap-1">
+                  <td className="sticky right-0 bg-ink-950 px-3 py-2 align-top shadow-[-4px_0_6px_rgba(0,0,0,0.4)]">
+                    <div className="flex flex-col gap-1">
                       {([1, 0, -1] as const).map((v) => {
                         const active = goldByDocId[d.id] === v;
                         return (
@@ -811,7 +813,7 @@ export default function ExplorePage() {
                             }`}
                             onClick={() => void setGoldVote(d.id, v)}
                           >
-                            {v === 1 ? "+1" : v === 0 ? "0" : "−1"}
+                            {v === 1 ? "+1" : v === 0 ? " 0" : "−1"}
                           </button>
                         );
                       })}

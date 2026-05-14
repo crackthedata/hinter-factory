@@ -20,6 +20,7 @@ from app.routers import (
     probabilistic,
     projects,
     tags,
+    topics,
 )
 
 
@@ -61,6 +62,7 @@ app.include_router(lf_runs.router)
 app.include_router(probabilistic.router)
 app.include_router(gold_labels.router)
 app.include_router(evaluation.router)
+app.include_router(topics.router)
 
 
 @app.get("/healthz")

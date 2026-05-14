@@ -130,6 +130,27 @@ class ProbabilisticLabel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class TopicModel(Base):
+    __tablename__ = "topic_models"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    n_topics: Mapped[int] = mapped_column(Integer, nullable=False)
+    algorithm: Mapped[str] = mapped_column(String(16), nullable=False)  # "lda" | "nmf"
+    max_features: Mapped[int] = mapped_column(Integer, default=5000, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON list of {id: int, top_words: [{word: str, weight: float}]}
+    topics_json: Mapped[list | None] = mapped_column("topics", JSON, nullable=True)
+    # JSON map of {doc_id: dominant_topic_index}
+    doc_topics_json: Mapped[dict | None] = mapped_column("doc_topics", JSON, nullable=True)
+    documents_processed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class GoldLabel(Base):
     __tablename__ = "gold_labels"
     __table_args__ = (UniqueConstraint("document_id", "tag_id"),)
