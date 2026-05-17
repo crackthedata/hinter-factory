@@ -23,6 +23,7 @@ export default function ProjectsPage() {
   const [newDescription, setNewDescription] = useState("");
   const [creating, setCreating] = useState(false);
   const [exporting, setExporting] = useState<string | null>(null);
+  const [exportingHinters, setExportingHinters] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -99,6 +100,33 @@ export default function ProjectsPage() {
       await refresh();
     } catch (e) {
       setError(describeMlFetchError(e));
+    }
+  };
+
+  const onExportHinters = async (project: Project) => {
+    setMessage(null);
+    setError(null);
+    setExportingHinters(project.id);
+    try {
+      const res = await fetch(`/api/ml/v1/projects/${project.id}/export-hinters`);
+      if (!res.ok) {
+        setError(`Export hinters failed (HTTP ${res.status}).`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${slugify(project.name)}.hinters.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setMessage(`Exported hinters for "${project.name}".`);
+    } catch (e) {
+      setError(describeMlFetchError(e));
+    } finally {
+      setExportingHinters(null);
     }
   };
 
@@ -295,7 +323,15 @@ export default function ProjectsPage() {
                         onClick={() => void onExport(p)}
                         className="rounded border border-ink-700 bg-ink-950 px-2 py-1 text-xs text-ink-200 hover:border-accent-500 disabled:opacity-50"
                       >
-                        {exporting === p.id ? "Exporting…" : "Export"}
+                        {exporting === p.id ? "Exporting…" : "Export project"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={exportingHinters === p.id}
+                        onClick={() => void onExportHinters(p)}
+                        className="whitespace-nowrap rounded border border-ink-700 bg-ink-950 px-2 py-1 text-xs text-ink-200 hover:border-accent-500 disabled:opacity-50"
+                      >
+                        {exportingHinters === p.id ? "Exporting…" : "Export hinters"}
                       </button>
                       <button
                         type="button"

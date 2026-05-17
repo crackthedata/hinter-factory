@@ -229,6 +229,45 @@ def export_project(
     }
 
 
+@router.get("/{project_id}/export-hinters")
+def export_hinters(project_id: str, db: Annotated[Session, Depends(get_db)]):
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    tags = list(db.scalars(select(Tag).where(Tag.project_id == project.id)).all())
+    lfs = list(
+        db.scalars(
+            select(LabelingFunction).where(
+                LabelingFunction.project_id == project.id,
+                LabelingFunction.enabled == True,
+            )
+        ).all()
+    )
+
+    config = {
+        "project_name": project.name,
+        "tags": []
+    }
+
+    for tag in tags:
+        tag_lfs = [lf for lf in lfs if lf.tag_id == tag.id]
+        if tag_lfs:
+            config["tags"].append({
+                "id": tag.id,
+                "name": tag.name,
+                "lfs": [
+                    {
+                        "type": lf.type,
+                        "config": dict(lf.config or {})
+                    }
+                    for lf in tag_lfs
+                ]
+            })
+
+    return config
+
+
 @router.post("/import", status_code=201)
 def import_project(
     payload: Annotated[dict, Body(...)],

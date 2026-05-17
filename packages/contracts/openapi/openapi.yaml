@@ -113,6 +113,47 @@ paths:
                 $ref: "#/components/schemas/ProjectExport"
         "404":
           description: Not found
+  /v1/projects/{project_id}/export-hinters:
+    get:
+      tags: [projects]
+      operationId: exportHinters
+      summary: Export the project's labeling functions as a static JSON configuration
+      parameters:
+        - in: path
+          name: project_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Static hinters configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_name:
+                    type: string
+                  tags:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        lfs:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              type:
+                                type: string
+                              config:
+                                type: object
+                                additionalProperties: true
+        "404":
+          description: Not found
   /v1/projects/import:
     post:
       tags: [projects]

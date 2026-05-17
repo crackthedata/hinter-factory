@@ -284,7 +284,11 @@ The migration is safe to run on every boot. There is **no** auto-created "Defaul
 
 ## Headless Batch Processing
 
-You can run labeling functions across a new CSV file without using the web UI or importing the documents into a project. The headless script reads an input CSV, applies a project's enabled labeling functions, computes probabilities, and writes a new CSV with the probability columns appended.
+You can run labeling functions across a new CSV file without using the web UI or importing the documents into a project.
+
+### Standard Headless Execution
+
+The standard headless script reads an input CSV, applies a project's enabled labeling functions directly from the backend database, computes probabilities, and writes a new CSV with the probability columns appended. It requires `hinter-factory` and its dependencies (like `sqlalchemy` and `sqlite`) to be installed.
 
 From `services/ml` with the venv activated:
 
@@ -309,6 +313,37 @@ On Windows PowerShell:
 ```powershell
 $env:HINTER_DATABASE_URL = "sqlite:///C:/path/to/hinter.db"
 python headless.py ...
+```
+
+### Standalone Static Inference
+
+If you want to run inferences on a separate machine without installing the full `hinter-factory` backend or a database, you can export your project's hinters to a static configuration file and run them using a standalone script.
+
+**1. Export the configuration**
+Run this from your `hinter-factory` machine (requires full dependencies):
+
+```bash
+cd services/ml
+python export_hinters.py \
+  --project-name "Your Project Name" \
+  --output-json my_hinters.json
+```
+
+**2. Run the standalone script**
+You only need to distribute two files to your target machine:
+1. `my_hinters.json`
+2. `services/ml/standalone_infer.py`
+
+The target machine **only** needs Python and the `polars` package installed (no `sqlalchemy`, `fastapi`, or database is required). You can install it via `pip install polars`.
+
+Run the standalone inference:
+
+```bash
+python standalone_infer.py \
+  --config my_hinters.json \
+  --input-csv path/to/input.csv \
+  --output-csv path/to/output.csv \
+  --text-column "text_column_name"
 ```
 
 ## Python tests
